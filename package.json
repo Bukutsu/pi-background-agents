@@ -10,6 +10,7 @@
     "bash-bg"
   ],
   "license": "MIT",
+  "author": "Bukutsu",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Bukutsu/pi-bg.git"

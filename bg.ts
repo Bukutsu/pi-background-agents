@@ -47,7 +47,7 @@ export default function (pi: ExtensionAPI) {
     ctx: any
   ) {
     const logFile = join(tmpdir(), `pi-bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
-    const out = openSync(logFile, "a");
+    const out = openSync(logFile, "a", 0o600);
     const proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
     proc.unref();
 
