@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Minimal background execution extension for Pi coding agent",
   "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",

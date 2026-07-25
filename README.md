@@ -11,9 +11,9 @@ Most subagent extensions are heavy, monolithic frameworks that force you to writ
 `pi-bg` takes a simpler approach:
 
 - **One lightweight runner for everything**: Handles both long-running bash processes (dev servers, test suites, builds) and subagent tasks under one extension.
-- **Zero runtime dependencies**: Built entirely on Node.js standard libraries (`child_process`, `fs`).
+- **No third-party runtime dependencies**: Uses Node.js standard libraries and Pi's bundled peer packages.
 - **No config files required**: Delegate tasks directly with optional model, effort, system prompt, or tool restrictions right in the tool call.
-- **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--system-prompt`, `--tools`).
+- **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--append-system-prompt`, `--tools`).
 - **Automatic result delivery**: Subagent outputs are delivered straight to your session when complete, saving extra log-reading turns.
 
 ## Installation

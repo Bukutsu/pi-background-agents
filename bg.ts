@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
@@ -19,14 +19,26 @@ interface BgJob {
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
 
-  pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry) =>
-    new Text(entry.data.content, 1, 0)
+  const renderMessage = (content: string, theme: Theme, padding: number) => {
+    const newline = content.indexOf("\n");
+    const heading = newline < 0 ? content : content.slice(0, newline);
+    const rest = newline < 0 ? "" : content.slice(newline);
+    const styledHeading = heading.includes("finished")
+      ? theme.fg("success", heading)
+      : heading.includes("failed") || heading.includes("could not")
+      ? theme.fg("error", heading)
+      : theme.fg("warning", heading);
+    return new Text(styledHeading + theme.fg("customMessageText", rest), padding, 0);
+  };
+
+  pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry, _options, theme) =>
+    renderMessage(entry.data.content, theme, 1)
   );
-  pi.registerMessageRenderer("pi-bg-result", (message, { outputPad }) =>
-    new Text(message.content, outputPad, 0)
+  pi.registerMessageRenderer("pi-bg-result", (message, { outputPad }, theme) =>
+    renderMessage(message.content, theme, outputPad)
   );
 
-  function syncStatus(ctx: any) {
+  function syncStatus(ctx: ExtensionContext) {
     try {
       ctx.ui.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
     } catch {}
@@ -61,7 +73,7 @@ export default function (pi: ExtensionAPI) {
     args: string[],
     displayCommand: string,
     timeoutSec: number,
-    ctx: any,
+    ctx: ExtensionContext,
     cleanupFiles: string[] = [],
     includeInContext = false
   ) {
@@ -170,6 +182,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("bg", {
     description: "List and manage background jobs",
+    getArgumentCompletions: (prefix) => {
+      const items = Array.from(jobs.values(), (job) => ({
+        value: `kill ${job.pid}`,
+        label: `kill ${job.pid}`,
+        description: job.command,
+      })).filter((item) => item.value.startsWith(prefix));
+      return items.length ? items : null;
+    },
     handler: async (args, ctx) => {
       const trimmed = args?.trim() ?? "";
       const killMatch = trimmed.match(/^(?:kill\s+)?(\d+)$/);
@@ -222,6 +242,14 @@ export default function (pi: ExtensionAPI) {
       command: Type.String({ description: "Shell command" }),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
     }),
+    renderCall({ command }, theme) {
+      const shown = command.length > 100 ? `${command.slice(0, 97)}...` : command;
+      return new Text(`${theme.fg("toolTitle", theme.bold("background "))}${theme.fg("toolOutput", shown)}`, 0, 0);
+    },
+    renderResult(result, _options, theme) {
+      const pid = result.details?.pid ? theme.fg("dim", ` [${result.details.pid}]`) : "";
+      return new Text(`${theme.fg("success", "Started")}${pid}`, 0, 0);
+    },
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
       return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
     },
@@ -240,6 +268,14 @@ export default function (pi: ExtensionAPI) {
       tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
     }),
+    renderCall({ prompt }, theme) {
+      const shown = prompt.length > 100 ? `${prompt.slice(0, 97)}...` : prompt;
+      return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("toolOutput", shown)}`, 0, 0);
+    },
+    renderResult(result, _options, theme) {
+      const model = result.details?.model ? theme.fg("dim", ` (${result.details.model})`) : "";
+      return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
+    },
     async execute(id, { prompt, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
@@ -271,7 +307,10 @@ export default function (pi: ExtensionAPI) {
       const displayCmd = `Subagent: ${label}`;
       const [file, invocationArgs] = getPiInvocation(args);
       try {
-        return runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true);
+        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true);
+        const selectedModel = selected ? `${selected.provider}/${selected.id}` : "Pi automatic selection";
+        job.content[0].text += `\nModel: ${selectedModel}`;
+        return { ...job, details: { ...job.details, model: selectedModel } };
       } catch (error) {
         for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
         throw error;
