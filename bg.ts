@@ -15,7 +15,7 @@ export default function (pi: ExtensionAPI) {
 
   function syncStatus(ctx: any) {
     try {
-      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${jobs.size} bg` : undefined);
+      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "✦ ")}${jobs.size} bg` : undefined);
     } catch {}
   }
 
@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const items = Array.from(jobs.values()).map(
-        (j) => `⚙ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+        (j) => `✦ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
       if (!ctx.hasUI) {
