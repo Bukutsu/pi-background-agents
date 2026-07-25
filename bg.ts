@@ -21,7 +21,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       if (jobs.size > 0) {
-        const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", "✦ ") : "✦ ";
+        const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", "● ") : "● ";
         const widgetLine = `${icon}${jobs.size} background task${jobs.size > 1 ? "s" : ""} running`;
         currentCtx?.ui?.setWidget("bg-jobs", [widgetLine]);
         currentCtx?.ui?.setStatus("bg-jobs", `${icon}${jobs.size} bg`);
