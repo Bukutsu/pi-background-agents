@@ -32,12 +32,14 @@ The agent can invoke the `bg` tool for long-running processes:
 }
 ```
 
-Or delegate tasks to a subagent with custom model/effort:
+Or delegate tasks to a subagent with custom description, model, effort, or restricted toolset:
 
 ```json
 {
   "prompt": "Write unit tests for auth module",
+  "description": "Auth Unit Tests",
   "model": "anthropic/claude-3-5-haiku",
-  "thinking": "low"
+  "thinking": "low",
+  "tools": "read,grep,find,ls"
 }
 ```

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
-import { openSync } from "node:fs";
+import { openSync, readFileSync } from "node:fs";
 
 interface BgJob {
   pid: number;
@@ -68,7 +68,17 @@ export default function (pi: ExtensionAPI) {
         : code !== null
         ? `exit ${code}`
         : `killed (${signal})`;
-      const msg = `[Background Job ${proc.pid}] ${status}. Command: "${displayCommand}". Log: ${logFile}`;
+      let outputSnippet = "";
+      if (code === 0) {
+        try {
+          const content = readFileSync(logFile, "utf-8").trim();
+          if (content) {
+            outputSnippet = `\nOutput:\n${content.length > 2000 ? content.slice(-2000) : content}`;
+          }
+        } catch {}
+      }
+
+      const msg = `[Background Job ${proc.pid}] ${status}. Command: "${displayCommand}". Log: ${logFile}${outputSnippet}`;
       let isIdle = false;
       try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
       try {
@@ -114,7 +124,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const items = Array.from(jobs.values()).map(
-        (j) => `✦ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+        (j) => `⚙ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
       if (!ctx.hasUI) {
@@ -153,19 +163,23 @@ export default function (pi: ExtensionAPI) {
     description: "Delegate a task to a background subagent with optional model and effort (thinking level)",
     parameters: Type.Object({
       prompt: Type.String({ description: "Task prompt for the subagent" }),
+      description: Type.Optional(Type.String({ description: "Short (3-5 word) summary description for display in task manager" })),
       model: Type.Optional(Type.String({ description: "Model pattern or ID (e.g. 'anthropic/claude-3-5-haiku', 'openai/gpt-4o-mini')" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
       systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt for the subagent" })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
-    async execute(id, { prompt, model, thinking, systemPrompt, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, description, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const args = ["-p"];
       if (model) args.push("--model", model);
       if (thinking) args.push("--thinking", thinking);
       if (systemPrompt) args.push("--system-prompt", systemPrompt);
+      if (tools) args.push("--tools", tools);
       args.push(prompt);
 
-      const displayCmd = `pi subagent: "${prompt.slice(0, 30)}${prompt.length > 30 ? "..." : ""}"`;
+      const label = description || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
+      const displayCmd = `pi subagent: "${label}"`;
       return runBgProcess("pi", args, displayCmd, timeoutSec, ctx);
     },
   });
