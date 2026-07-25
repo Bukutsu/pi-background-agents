@@ -12,6 +12,7 @@ interface BgJob {
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
+  let lastCtx: any = null;
 
   function syncStatus(ctx?: any) {
     if (ctx) lastCtx = ctx;
