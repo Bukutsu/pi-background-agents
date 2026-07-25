@@ -1,18 +1,19 @@
 # pi-bg
 
-Minimal background execution extension for [Pi Coding Agent](https://pi.dev).
+Background execution and subagent delegation for [Pi Coding Agent](https://pi.dev).
+
+Runs long commands and delegated tasks asynchronously so your main conversation stays responsive and your context window stays clean.
 
 ## Features
 
-- **`bg` tool**: Runs long bash commands asynchronously without blocking Pi execution.
-- **`subagent` tool**: Delegate tasks to headless Pi subagents with optional model selection and thinking effort.
-- **`/bg` command**: Interactive task manager to view and kill running background tasks directly.
-- **Status bar**: Live `⚙ X bg` indicator in Pi's status bar.
-- **Auto-signal**: Delivers exit notifications directly to the session when jobs complete or time out.
-- **Timeout guard**: Auto-terminates stalled background process groups.
-- **Zero external runtime dependencies**: Uses standard Node.js libraries.
+- **`bg` tool**: Runs bash commands in the background without blocking the main agent.
+- **`subagent` tool**: Delegates tasks to isolated subagent processes with optional model, thinking level, system prompt, and tool restrictions.
+- **`/bg` command**: Interactive menu to check and stop active jobs.
+- **Status bar**: Minimal `● N bg` indicator in Pi's status bar.
+- **Automatic completion updates**: Delivers job results directly to the chat when tasks finish or time out.
+- **Zero dependencies**: Uses Node.js standard libraries only.
 
-## Install
+## Installation
 
 ```bash
 pi install git:github.com/Bukutsu/pi-bg
@@ -20,10 +21,14 @@ pi install git:github.com/Bukutsu/pi-bg
 
 ## Usage
 
-- **`/bg`**: Interactive TUI selector to view and stop running tasks.
-- **`/bg kill <pid>`**: Kill a task by PID directly.
+### Interactive Command
 
-The agent can invoke the `bg` tool for long-running processes:
+- Type `/bg` to pick and stop active tasks.
+- Type `/bg kill <pid>` to stop a task by PID.
+
+### Tools
+
+Run a command in the background:
 
 ```json
 {
@@ -32,12 +37,12 @@ The agent can invoke the `bg` tool for long-running processes:
 }
 ```
 
-Or delegate tasks to a subagent with custom description, model, effort, or restricted toolset:
+Delegate a task to a subagent with custom model, effort, or restricted tools:
 
 ```json
 {
-  "prompt": "Write unit tests for auth module",
-  "description": "Auth Unit Tests",
+  "prompt": "Inspect auth module for security issues",
+  "description": "Security Audit",
   "model": "anthropic/claude-3-5-haiku",
   "thinking": "low",
   "tools": "read,grep,find,ls"
