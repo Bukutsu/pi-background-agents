@@ -13,37 +13,9 @@ interface BgJob {
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
 
-  const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  let spinnerIndex = 0;
-  let spinnerInterval: ReturnType<typeof setInterval> | null = null;
-  let lastCtx: any = null;
-
-  function syncStatus(ctx?: any) {
-    if (ctx) lastCtx = ctx;
-    const currentCtx = lastCtx;
-    if (!currentCtx) return;
-
-    if (jobs.size === 0) {
-      if (spinnerInterval) {
-        clearInterval(spinnerInterval);
-        spinnerInterval = null;
-      }
-      try {
-        currentCtx?.ui?.setStatus("bg-jobs", undefined);
-      } catch {}
-      return;
-    }
-
-    if (!spinnerInterval) {
-      spinnerInterval = setInterval(() => {
-        spinnerIndex = (spinnerIndex + 1) % SPINNER.length;
-        syncStatus();
-      }, 80);
-    }
-
+  function syncStatus(ctx: any) {
     try {
-      const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", `${SPINNER[spinnerIndex]} `) : `${SPINNER[spinnerIndex]} `;
-      currentCtx?.ui?.setStatus("bg-jobs", `${icon}${jobs.size} bg`);
+      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${jobs.size} bg` : undefined);
     } catch {}
   }
 
@@ -111,10 +83,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
-    if (spinnerInterval) {
-      clearInterval(spinnerInterval);
-      spinnerInterval = null;
-    }
     for (const pid of Array.from(jobs.keys())) {
       killJob(pid);
     }
@@ -141,7 +109,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const items = Array.from(jobs.values()).map(
-        (j) => `[${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+        (j) => `⠋ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
       if (!ctx.hasUI) {
@@ -151,7 +119,7 @@ export default function (pi: ExtensionAPI) {
 
       const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
       if (choice && choice !== "Cancel") {
-        const match = choice.match(/^\[(\d+)\]/);
+        const match = choice.match(/\[(\d+)\]/);
         if (match) {
           const pid = parseInt(match[1], 10);
           if (killJob(pid)) {
