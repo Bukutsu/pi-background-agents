@@ -2,7 +2,7 @@
 
 Background execution and subagent delegation for [Pi Coding Agent](https://pi.dev).
 
-Runs long shell commands and delegated subagents asynchronously so your main conversation stays fast, responsive, and uncluttered.
+Runs shell commands and delegated subagents in the background while the main agent keeps working.
 
 ## Why pi-bg?
 

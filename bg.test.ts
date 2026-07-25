@@ -32,7 +32,7 @@ test("background job lifecycle", async () => {
   const bg = tools.get("bg");
 
   const short = await bg.execute("short", { command: "printf 'done\\n'", timeoutSec: 5 }, undefined, undefined, ctx);
-  expect(short.terminate).toBe(true);
+  expect(short.terminate).toBeUndefined();
   await waitForEntries(1);
   expect(entries[0].content).toContain("Background task finished");
   expect(entries[0].content).toContain("done");

@@ -159,7 +159,6 @@ export default function (pi: ExtensionAPI) {
         text: `Started: ${shownCommand}\nThe result will appear here when it is ready. Use /bg to view or stop the task.`,
       }],
       details: { pid: proc.pid, logFile },
-      ...(includeInContext ? {} : { terminate: true }),
     };
   }
 
