@@ -1,9 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+
+const LOG_DIR = join(tmpdir(), "pi-bg");
+const MAX_TIMEOUT_SEC = 2_147_483;
 
 interface BgJob {
   pid: number;
@@ -24,15 +27,24 @@ export default function (pi: ExtensionAPI) {
     if (!jobs.has(pid)) return false;
     try {
       if (process.platform === "win32") {
-        try { process.kill(pid, "SIGKILL"); } catch {
-          spawn("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" }).unref();
-        }
-      } else {
-        try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+        const result = spawnSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
+        return !result.error && result.status === 0;
       }
-    } catch {}
-    jobs.delete(pid);
-    return true;
+      try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function getPiInvocation(args: string[]): [string, string[]] {
+    const script = process.argv[1];
+    if (script && !script.startsWith("/$bunfs/root/") && existsSync(script)) {
+      return [process.execPath, [script, ...args]];
+    }
+    return /^(node|bun)(\.exe)?$/.test(basename(process.execPath).toLowerCase())
+      ? ["pi", args]
+      : [process.execPath, args];
   }
 
   function runBgProcess(
@@ -40,9 +52,11 @@ export default function (pi: ExtensionAPI) {
     args: string[],
     displayCommand: string,
     timeoutSec: number,
-    ctx: any
+    ctx: any,
+    cleanupFiles: string[] = []
   ) {
-    const logFile = join(tmpdir(), `pi-bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
+    mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+    const logFile = join(LOG_DIR, `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
     const out = openSync(logFile, "wx", 0o600);
     let proc;
     try {
@@ -82,11 +96,14 @@ export default function (pi: ExtensionAPI) {
         ? "Background task was stopped"
         : "Background task failed";
       let result = "";
+      let keepLog = code !== 0 || Boolean(spawnError);
       try {
         const content = readFileSync(logFile, "utf-8").trim();
         if (content.length > 2000) {
-          const preview = content.slice(0, 2000).replace(/\s+\S*$/, "");
-          result = `\n\nResult:\n${preview}\n\nThe result was shortened. Full result: ${logFile}`;
+          const head = content.slice(0, 1000).replace(/\s+\S*$/, "");
+          const tail = content.slice(-1000).replace(/^\S*\s+/, "");
+          result = `\n\nResult:\n${head}\n\n[Middle omitted]\n\n${tail}\n\nThe result was shortened. Full result: ${logFile}`;
+          keepLog = true;
         } else if (content) {
           result = `\n\nResult:\n${content}`;
         }
@@ -96,10 +113,17 @@ export default function (pi: ExtensionAPI) {
       const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
       const msg = `${heading}\nTask: ${displayCommand}${reason}${result}${troubleshooting}`;
       let isIdle = false;
-      try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
+      try { isIdle = ctx.isIdle(); } catch {}
       try {
-        pi.sendUserMessage(msg, { deliverAs: isIdle ? undefined : "followUp" });
-      } catch {}
+        pi.sendMessage(
+          { customType: "pi-bg-result", content: msg, display: true },
+          isIdle ? undefined : { deliverAs: "followUp" },
+        );
+        if (!keepLog) unlinkSync(logFile);
+      } catch (error) {
+        console.error(`pi-bg could not deliver a result. Full result: ${logFile}`, error);
+      }
+      for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
     });
 
     return {
@@ -115,16 +139,11 @@ export default function (pi: ExtensionAPI) {
     syncStatus(ctx);
     try {
       const now = Date.now();
-      const dayMs = 24 * 60 * 60 * 1000;
-      const dir = tmpdir();
-      for (const file of readdirSync(dir)) {
-        if (file.startsWith("pi-bg-") && file.endsWith(".log")) {
-          const fullPath = join(dir, file);
-          try {
-            const stat = statSync(fullPath);
-            if (now - stat.mtimeMs > dayMs) unlinkSync(fullPath);
-          } catch {}
-        }
+      for (const file of readdirSync(LOG_DIR)) {
+        const fullPath = join(LOG_DIR, file);
+        try {
+          if (now - statSync(fullPath).mtimeMs > 86_400_000) unlinkSync(fullPath);
+        } catch {}
       }
     } catch {}
   });
@@ -137,14 +156,19 @@ export default function (pi: ExtensionAPI) {
     description: "List and manage background jobs",
     handler: async (args, ctx) => {
       const trimmed = args?.trim() ?? "";
-      if (trimmed.startsWith("kill ") || /^\d+$/.test(trimmed)) {
-        const pid = parseInt(trimmed.replace(/^kill\s+/, ""), 10);
+      const killMatch = trimmed.match(/^(?:kill\s+)?(\d+)$/);
+      if (killMatch) {
+        const pid = Number(killMatch[1]);
         if (killJob(pid)) {
           ctx.ui.notify(`Killed background job ${pid}`, "info");
           syncStatus(ctx);
         } else {
           ctx.ui.notify(`No background job found with PID ${pid}`, "error");
         }
+        return;
+      }
+      if (trimmed.startsWith("kill")) {
+        ctx.ui.notify("Usage: /bg kill <pid>", "error");
         return;
       }
 
@@ -182,7 +206,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Bash command to run in background" }),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, description: "Max run time in seconds before auto-kill (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
       return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
@@ -203,28 +227,44 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.Optional(Type.String({ pattern: "^(off|minimal|low|medium|high|xhigh|max)$", description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt persona instructions for the subagent" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, description: "Max run time in seconds before auto-kill (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { prompt, description, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
-      const requestedModel = requested
-        ? available.find((m) => m.id.toLowerCase() === requested || `${m.provider}/${m.id}`.toLowerCase() === requested) ??
-          available.find((m) => m.id.toLowerCase().includes(requested) || m.name?.toLowerCase().includes(requested))
-        : undefined;
+      const exact = requested && available.find((m) =>
+        m.id.toLowerCase() === requested || `${m.provider}/${m.id}`.toLowerCase() === requested
+      );
+      const fuzzy = requested ? available.filter((m) =>
+        m.id.toLowerCase().includes(requested) || m.name?.toLowerCase().includes(requested)
+      ) : [];
+      const requestedModel = exact || (fuzzy.length === 1 ? fuzzy[0] : undefined);
       const selected = requestedModel ??
         (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
 
-      const args = ["-p"];
+      const args = ["-p", "--no-session"];
+      const cleanupFiles: string[] = [];
       if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
       if (thinking) args.push("--thinking", thinking);
-      if (systemPrompt) args.push("--system-prompt", systemPrompt);
+      if (systemPrompt) {
+        mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+        const promptFile = join(LOG_DIR, `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.md`);
+        writeFileSync(promptFile, systemPrompt, { mode: 0o600, flag: "wx" });
+        cleanupFiles.push(promptFile);
+        args.push("--append-system-prompt", promptFile);
+      }
       if (tools) args.push("--tools", tools);
       args.push(prompt);
 
       const label = description || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
       const displayCmd = `Subagent: ${label}`;
-      return runBgProcess("pi", args, displayCmd, timeoutSec, ctx);
+      const [file, invocationArgs] = getPiInvocation(args);
+      try {
+        return runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles);
+      } catch (error) {
+        for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
+        throw error;
+      }
     },
   });
 }
