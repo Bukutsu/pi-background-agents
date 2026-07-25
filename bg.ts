@@ -33,6 +33,12 @@ export default function (pi: ExtensionAPI) {
     spawn("find", ["/tmp", "-name", "pi-bg-*.log", "-mtime", "+1", "-delete"], { detached: true, stdio: "ignore" }).unref();
   });
 
+  pi.on("session_shutdown", () => {
+    for (const pid of Array.from(jobs.keys())) {
+      killJob(pid);
+    }
+  });
+
   pi.registerCommand("bg", {
     description: "List and manage background jobs",
     handler: async (args, ctx) => {
