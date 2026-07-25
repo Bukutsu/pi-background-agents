@@ -148,9 +148,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "bg",
-    description: "Run a long-running shell command in the background without blocking execution",
+    description: "Execute a shell command asynchronously in the background. Use this instead of standard bash whenever running servers, builds, test suites, or long-running tasks so execution stays non-blocking.",
+    promptSnippet: "bg: Execute bash commands in background without blocking execution.",
+    promptGuidelines: [
+      "Use bg tool instead of bash for long-running shell commands, servers, builds, test suites, or tasks that take time to execute.",
+    ],
     parameters: Type.Object({
-      command: Type.String({ description: "Bash command to run" }),
+      command: Type.String({ description: "Bash command to run in background" }),
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
@@ -160,13 +164,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "subagent",
-    description: "Delegate a task to a background subagent with optional model and effort (thinking level)",
+    description: "Delegate a task to an isolated background subagent process with optional custom model, thinking effort, system prompt persona, and restricted tools. Use subagents for parallel research, code reviews, deep exploration, or heavy tasks to keep your main conversation context clean.",
+    promptSnippet: "subagent: Delegate specialized tasks to an isolated background subagent process.",
+    promptGuidelines: [
+      "Use subagent tool to delegate specialized research, code review, exploration, or parallel tasks to an isolated subagent with its own context window.",
+    ],
     parameters: Type.Object({
-      prompt: Type.String({ description: "Task prompt for the subagent" }),
-      description: Type.Optional(Type.String({ description: "Short (3-5 word) summary description for display in task manager" })),
+      prompt: Type.String({ description: "Detailed task instructions for the subagent" }),
+      description: Type.Optional(Type.String({ description: "Short (3-5 word) summary label for display in task manager" })),
       model: Type.Optional(Type.String({ description: "Model pattern or ID (e.g. 'anthropic/claude-3-5-haiku', 'openai/gpt-4o-mini')" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
-      systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt for the subagent" })),
+      systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt persona instructions for the subagent" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
