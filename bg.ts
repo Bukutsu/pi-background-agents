@@ -73,14 +73,14 @@ export default function (pi: ExtensionAPI) {
       syncStatus(ctx);
 
       const heading = timedOut
-        ? `⏱️ Background task stopped after ${timeoutSec} seconds`
+        ? `Background task timed out after ${timeoutSec} seconds`
         : spawnError
-        ? "❌ Background task could not start"
+        ? "Background task could not start"
         : code === 0
-        ? "✅ Background task completed"
+        ? "Background task finished"
         : signal
-        ? "⏹️ Background task stopped"
-        : "❌ Background task failed";
+        ? "Background task was stopped"
+        : "Background task failed";
       let result = "";
       try {
         const content = readFileSync(logFile, "utf-8").trim();
@@ -100,7 +100,7 @@ export default function (pi: ExtensionAPI) {
     return {
       content: [{
         type: "text",
-        text: `Started in the background: ${displayCommand}\nYou can keep working—I’ll post the result when it finishes. Use /bg to view or stop it.`,
+        text: `Started: ${displayCommand}\nYou can keep working. The result will appear here when it is ready. Use /bg to view or stop the task.`,
       }],
       details: { pid: proc.pid, logFile },
     };
