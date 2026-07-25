@@ -5,6 +5,7 @@ Minimal background execution extension for [Pi Coding Agent](https://pi.dev).
 ## Features
 
 - **`bg` tool**: Runs long bash commands asynchronously without blocking Pi execution.
+- **`subagent` tool**: Delegate tasks to headless Pi subagents with optional model selection and thinking effort.
 - **`/bg` command**: Interactive task manager to view and kill running background tasks directly.
 - **Status bar**: Live `⚙ X bg` indicator in Pi's status bar.
 - **Auto-signal**: Delivers exit notifications directly to the session when jobs complete or time out.
@@ -28,5 +29,15 @@ The agent can invoke the `bg` tool for long-running processes:
 {
   "command": "npm test",
   "timeoutSec": 300
+}
+```
+
+Or delegate tasks to a subagent with custom model/effort:
+
+```json
+{
+  "prompt": "Write unit tests for auth module",
+  "model": "anthropic/claude-3-5-haiku",
+  "thinking": "low"
 }
 ```

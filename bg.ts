@@ -28,6 +28,55 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  function runBgProcess(
+    file: string,
+    args: string[],
+    displayCommand: string,
+    timeoutSec: number,
+    ctx: any
+  ) {
+    const logFile = `/tmp/pi-bg-${Date.now()}.log`;
+    const out = openSync(logFile, "a");
+    const proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
+    proc.unref();
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      if (proc.pid && jobs.has(proc.pid)) {
+        timedOut = true;
+        killJob(proc.pid);
+      }
+    }, timeoutSec * 1000);
+
+    if (proc.pid) {
+      jobs.set(proc.pid, { pid: proc.pid, command: displayCommand, logFile, startedAt: Date.now() });
+      syncStatus(ctx);
+    }
+
+    proc.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (proc.pid) jobs.delete(proc.pid);
+      syncStatus(ctx);
+
+      const status = timedOut
+        ? `TIMED OUT after ${timeoutSec}s`
+        : code !== null
+        ? `exit ${code}`
+        : `killed (${signal})`;
+      const msg = `[Background Job ${proc.pid}] ${status}. Command: "${displayCommand}". Log: ${logFile}`;
+      let isIdle = false;
+      try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
+      try {
+        pi.sendUserMessage(msg, { deliverAs: isIdle ? undefined : "followUp" });
+      } catch {}
+    });
+
+    return {
+      content: [{ type: "text", text: `Job started in background [PID ${proc.pid}, max ${timeoutSec}s]. Log: ${logFile}` }],
+      details: { pid: proc.pid, logFile },
+    };
+  }
+
   pi.on("session_start", (_e, ctx) => {
     syncStatus(ctx);
     spawn("find", ["/tmp", "-name", "pi-bg-*.log", "-mtime", "+1", "-delete"], { detached: true, stdio: "ignore" }).unref();
@@ -90,46 +139,27 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      const logFile = `/tmp/pi-bg-${Date.now()}.log`;
-      const out = openSync(logFile, "a");
-      const proc = spawn("bash", ["-c", command], { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
-      proc.unref();
+      return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
+    },
+  });
 
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        if (proc.pid && jobs.has(proc.pid)) {
-          timedOut = true;
-          killJob(proc.pid);
-        }
-      }, timeoutSec * 1000);
+  pi.registerTool({
+    name: "subagent",
+    description: "Delegate a task to a background subagent with optional model and effort (thinking level)",
+    parameters: Type.Object({
+      prompt: Type.String({ description: "Task prompt for the subagent" }),
+      model: Type.Optional(Type.String({ description: "Model pattern or ID (e.g. 'anthropic/claude-3-5-haiku', 'openai/gpt-4o-mini')" })),
+      thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
+      timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
+    }),
+    async execute(id, { prompt, model, thinking, timeoutSec = 600 }, _sig, _up, ctx) {
+      const args = ["-p"];
+      if (model) args.push("--model", model);
+      if (thinking) args.push("--thinking", thinking);
+      args.push(prompt);
 
-      if (proc.pid) {
-        jobs.set(proc.pid, { pid: proc.pid, command, logFile, startedAt: Date.now() });
-        syncStatus(ctx);
-      }
-
-      proc.on("exit", (code, signal) => {
-        clearTimeout(timer);
-        if (proc.pid) jobs.delete(proc.pid);
-        syncStatus(ctx);
-
-        const status = timedOut
-          ? `TIMED OUT after ${timeoutSec}s`
-          : code !== null
-          ? `exit ${code}`
-          : `killed (${signal})`;
-        const msg = `[Background Job ${proc.pid}] ${status}. Command: "${command}". Log: ${logFile}`;
-        let isIdle = false;
-        try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
-        try {
-          pi.sendUserMessage(msg, { deliverAs: isIdle ? undefined : "followUp" });
-        } catch {}
-      });
-
-      return {
-        content: [{ type: "text", text: `Command started in background [PID ${proc.pid}, max ${timeoutSec}s]. Log: ${logFile}` }],
-        details: { pid: proc.pid, logFile },
-      };
+      const displayCmd = `pi subagent: "${prompt.slice(0, 30)}${prompt.length > 30 ? "..." : ""}"`;
+      return runBgProcess("pi", args, displayCmd, timeoutSec, ctx);
     },
   });
 }
