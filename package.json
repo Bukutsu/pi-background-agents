@@ -1,0 +1,26 @@
+{
+  "name": "pi-bg",
+  "version": "0.1.0",
+  "description": "Minimal background execution extension for Pi coding agent",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "background",
+    "bash-bg"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bukutsu/pi-bg.git"
+  },
+  "pi": {
+    "extensions": [
+      "./bg.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
