@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
-import { openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,7 +24,9 @@ export default function (pi: ExtensionAPI) {
     if (!jobs.has(pid)) return false;
     try {
       if (process.platform === "win32") {
-        try { process.kill(pid, "SIGKILL"); } catch { spawn("taskkill", ["/F", "/PID", String(pid), "/T"]); }
+        try { process.kill(pid, "SIGKILL"); } catch {
+          spawn("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" }).unref();
+        }
       } else {
         try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
       }
@@ -41,11 +43,18 @@ export default function (pi: ExtensionAPI) {
     ctx: any
   ) {
     const logFile = join(tmpdir(), `pi-bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
-    const out = openSync(logFile, "a", 0o600);
-    const proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
+    const out = openSync(logFile, "wx", 0o600);
+    let proc;
+    try {
+      proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
+    } finally {
+      closeSync(out);
+    }
     proc.unref();
 
     let timedOut = false;
+    let spawnError: string | undefined;
+    proc.once("error", (error) => { spawnError = error.message; });
     const timer = setTimeout(() => {
       if (proc.pid && jobs.has(proc.pid)) {
         timedOut = true;
@@ -58,27 +67,29 @@ export default function (pi: ExtensionAPI) {
       syncStatus(ctx);
     }
 
-    proc.on("exit", (code, signal) => {
+    proc.once("close", (code, signal) => {
       clearTimeout(timer);
       if (proc.pid) jobs.delete(proc.pid);
       syncStatus(ctx);
 
-      const status = timedOut
-        ? `TIMED OUT after ${timeoutSec}s`
-        : code !== null
-        ? `exit ${code}`
-        : `killed (${signal})`;
-      let outputSnippet = "";
-      if (code === 0) {
-        try {
-          const content = readFileSync(logFile, "utf-8").trim();
-          if (content) {
-            outputSnippet = `\nOutput:\n${content.length > 2000 ? content.slice(-2000) : content}`;
-          }
-        } catch {}
-      }
+      const heading = timedOut
+        ? `⏱️ Background task stopped after ${timeoutSec} seconds`
+        : spawnError
+        ? "❌ Background task could not start"
+        : code === 0
+        ? "✅ Background task completed"
+        : signal
+        ? "⏹️ Background task stopped"
+        : "❌ Background task failed";
+      let result = "";
+      try {
+        const content = readFileSync(logFile, "utf-8").trim();
+        if (content) result = `\n\nResult:\n${content.slice(-2000)}`;
+      } catch {}
 
-      const msg = `[Background Job ${proc.pid}] ${status}. Command: "${displayCommand}". Log: ${logFile}${outputSnippet}`;
+      const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
+      const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
+      const msg = `${heading}\nTask: ${displayCommand}${reason}${result}${troubleshooting}`;
       let isIdle = false;
       try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
       try {
@@ -87,7 +98,10 @@ export default function (pi: ExtensionAPI) {
     });
 
     return {
-      content: [{ type: "text", text: `Job started in background [PID ${proc.pid}, max ${timeoutSec}s]. Log: ${logFile}` }],
+      content: [{
+        type: "text",
+        text: `Started in the background: ${displayCommand}\nYou can keep working—I’ll post the result when it finishes. Use /bg to view or stop it.`,
+      }],
       details: { pid: proc.pid, logFile },
     };
   }
@@ -142,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 
       const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
       if (choice && choice !== "Cancel") {
-        const match = choice.match(/^\[(\d+)\]/);
+        const match = choice.match(/\[(\d+)\]/);
         if (match) {
           const pid = parseInt(match[1], 10);
           if (killJob(pid)) {
@@ -163,7 +177,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       command: Type.String({ description: "Bash command to run in background" }),
-      timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
       return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
@@ -181,21 +195,19 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Detailed task instructions for the subagent" }),
       description: Type.Optional(Type.String({ description: "Short (3-5 word) summary label for display in task manager" })),
       model: Type.Optional(Type.String({ description: "Preferred model pattern or ID; falls back to the parent model, then Pi's scoped/default models" })),
-      thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
+      thinking: Type.Optional(Type.String({ pattern: "^(off|minimal|low|medium|high|xhigh|max)$", description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt persona instructions for the subagent" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
-      timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { prompt, description, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
-      const requested = model?.toLowerCase();
-      const selected =
-        (requested && available.find((m) =>
-          m.id.toLowerCase() === requested ||
-          `${m.provider}/${m.id}`.toLowerCase() === requested ||
-          m.id.toLowerCase().includes(requested) ||
-          m.name?.toLowerCase().includes(requested)
-        )) ||
+      const requested = model?.trim().toLowerCase();
+      const requestedModel = requested
+        ? available.find((m) => m.id.toLowerCase() === requested || `${m.provider}/${m.id}`.toLowerCase() === requested) ??
+          available.find((m) => m.id.toLowerCase().includes(requested) || m.name?.toLowerCase().includes(requested))
+        : undefined;
+      const selected = requestedModel ??
         (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
 
       const args = ["-p"];
@@ -206,7 +218,7 @@ export default function (pi: ExtensionAPI) {
       args.push(prompt);
 
       const label = description || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
-      const displayCmd = `pi subagent: "${label}"`;
+      const displayCmd = `Subagent: ${label}`;
       return runBgProcess("pi", args, displayCmd, timeoutSec, ctx);
     },
   });
