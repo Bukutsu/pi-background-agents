@@ -13,9 +13,21 @@ interface BgJob {
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
 
-  function syncStatus(ctx: any) {
+  function syncStatus(ctx?: any) {
+    if (ctx) lastCtx = ctx;
+    const currentCtx = lastCtx;
+    if (!currentCtx) return;
+
     try {
-      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "✦ ")}${jobs.size} bg` : undefined);
+      if (jobs.size > 0) {
+        const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", "✦ ") : "✦ ";
+        const widgetLine = `${icon}${jobs.size} background task${jobs.size > 1 ? "s" : ""} running`;
+        currentCtx?.ui?.setWidget("bg-jobs", [widgetLine]);
+        currentCtx?.ui?.setStatus("bg-jobs", `${icon}${jobs.size} bg`);
+      } else {
+        currentCtx?.ui?.setWidget("bg-jobs", undefined);
+        currentCtx?.ui?.setStatus("bg-jobs", undefined);
+      }
     } catch {}
   }
 
