@@ -8,21 +8,15 @@ import { join } from "node:path";
 interface BgJob {
   pid: number;
   command: string;
-  logFile: string;
   startedAt: number;
 }
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
-  let lastCtx: any = null;
 
-  function syncStatus(ctx?: any) {
-    if (ctx) lastCtx = ctx;
-    const currentCtx = lastCtx;
-    if (!currentCtx) return;
-
+  function syncStatus(ctx: any) {
     try {
-      currentCtx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${currentCtx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
+      ctx.ui.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
     } catch {}
   }
 
@@ -60,7 +54,7 @@ export default function (pi: ExtensionAPI) {
     }, timeoutSec * 1000);
 
     if (proc.pid) {
-      jobs.set(proc.pid, { pid: proc.pid, command: displayCommand, logFile, startedAt: Date.now() });
+      jobs.set(proc.pid, { pid: proc.pid, command: displayCommand, startedAt: Date.now() });
       syncStatus(ctx);
     }
 
@@ -117,9 +111,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
-    for (const pid of Array.from(jobs.keys())) {
-      killJob(pid);
-    }
+    for (const pid of jobs.keys()) killJob(pid);
   });
 
   pi.registerCommand("bg", {
@@ -146,10 +138,7 @@ export default function (pi: ExtensionAPI) {
         (j) => `⚙ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
-      if (!ctx.hasUI) {
-        ctx.ui.notify(`Running background jobs:\n${items.join("\n")}`, "info");
-        return;
-      }
+      if (!ctx.hasUI) return;
 
       const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
       if (choice && choice !== "Cancel") {
@@ -167,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "bg",
-    description: "Execute a shell command asynchronously in the background. Use this instead of standard bash whenever running servers, builds, test suites, or long-running tasks so execution stays non-blocking.",
+    description: "Execute a shell command asynchronously in the background.",
     promptSnippet: "bg: Execute bash commands in background without blocking execution.",
     promptGuidelines: [
       "Use bg tool instead of bash for long-running shell commands, servers, builds, test suites, or tasks that take time to execute.",
@@ -183,7 +172,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "subagent",
-    description: "Delegate a task to an isolated background subagent process with optional custom model, thinking effort, system prompt persona, and restricted tools. Use subagents for parallel research, code reviews, deep exploration, or heavy tasks to keep your main conversation context clean.",
+    description: "Delegate a task to an isolated background Pi process with optional model, thinking effort, system prompt, and tool restrictions.",
     promptSnippet: "subagent: Delegate specialized tasks to an isolated background subagent process.",
     promptGuidelines: [
       "Use subagent tool to delegate specialized research, code review, exploration, or parallel tasks to an isolated subagent with its own context window.",
@@ -191,15 +180,26 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       prompt: Type.String({ description: "Detailed task instructions for the subagent" }),
       description: Type.Optional(Type.String({ description: "Short (3-5 word) summary label for display in task manager" })),
-      model: Type.Optional(Type.String({ description: "Model pattern or ID (e.g. 'anthropic/claude-3-5-haiku', 'openai/gpt-4o-mini')" })),
+      model: Type.Optional(Type.String({ description: "Preferred model pattern or ID; falls back to the parent model, then Pi's scoped/default models" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
       systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt persona instructions for the subagent" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { prompt, description, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+      const available = ctx.modelRegistry.getAvailable();
+      const requested = model?.toLowerCase();
+      const selected =
+        (requested && available.find((m) =>
+          m.id.toLowerCase() === requested ||
+          `${m.provider}/${m.id}`.toLowerCase() === requested ||
+          m.id.toLowerCase().includes(requested) ||
+          m.name?.toLowerCase().includes(requested)
+        )) ||
+        (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
+
       const args = ["-p"];
-      if (model) args.push("--model", model);
+      if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
       if (thinking) args.push("--thinking", thinking);
       if (systemPrompt) args.push("--system-prompt", systemPrompt);
       if (tools) args.push("--tools", tools);
