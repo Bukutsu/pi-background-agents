@@ -141,7 +141,7 @@ export default function (pi: ExtensionAPI) {
           try { isIdle = ctx.isIdle(); } catch {}
           pi.sendMessage(
             { customType: "pi-bg-result", content: msg, display: true },
-            isIdle ? undefined : { deliverAs: "followUp" },
+            { deliverAs: "steer", triggerTurn: isIdle },
           );
         } else {
           pi.appendEntry("pi-bg-result", { content: msg });
@@ -156,7 +156,7 @@ export default function (pi: ExtensionAPI) {
     return {
       content: [{
         type: "text",
-        text: `Started: ${shownCommand}\nThe result will appear here when it is ready. Use /bg to view or stop the task.`,
+        text: `Started: ${shownCommand}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.`,
       }],
       details: { pid: proc.pid, logFile },
     };
@@ -236,7 +236,7 @@ export default function (pi: ExtensionAPI) {
     name: "bg",
     label: "Background",
     description: "Run a shell command in the background.",
-    promptGuidelines: ["Use bg for long-running commands."],
+    promptGuidelines: ["Use bg for long-running commands. After starting it, continue other work; never wait, sleep, or poll for completion."],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command" }),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
@@ -258,7 +258,7 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Run a task in a separate background Pi process.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Restrict tools to those needed."],
+    promptGuidelines: ["Use subagent for isolated or parallel work. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
       model: Type.Optional(Type.String({ description: "Preferred model" })),
