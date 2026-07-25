@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const items = Array.from(jobs.values()).map(
-        (j) => `⠋ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+        (j) => `[${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
       if (!ctx.hasUI) {
@@ -119,7 +119,7 @@ export default function (pi: ExtensionAPI) {
 
       const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
       if (choice && choice !== "Cancel") {
-        const match = choice.match(/\[(\d+)\]/);
+        const match = choice.match(/^\[(\d+)\]/);
         if (match) {
           const pid = parseInt(match[1], 10);
           if (killJob(pid)) {
