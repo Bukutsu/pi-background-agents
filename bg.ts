@@ -177,10 +177,7 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      const isWin = process.platform === "win32";
-      const shell = isWin ? (process.env.ComSpec || "cmd.exe") : "bash";
-      const args = isWin ? ["/d", "/s", "/c", command] : ["-c", command];
-      return runBgProcess(shell, args, command, timeoutSec, ctx);
+      return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
     },
   });
 
