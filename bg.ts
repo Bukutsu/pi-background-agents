@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +18,13 @@ interface BgJob {
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
+
+  pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry) =>
+    new Text(entry.data.content, 1, 0)
+  );
+  pi.registerMessageRenderer("pi-bg-result", (message, { outputPad }) =>
+    new Text(message.content, outputPad, 0)
+  );
 
   function syncStatus(ctx: any) {
     try {
@@ -53,8 +62,10 @@ export default function (pi: ExtensionAPI) {
     displayCommand: string,
     timeoutSec: number,
     ctx: any,
-    cleanupFiles: string[] = []
+    cleanupFiles: string[] = [],
+    includeInContext = false
   ) {
+    const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
     const logFile = join(LOG_DIR, `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
     const out = openSync(logFile, "wx", 0o600);
@@ -77,7 +88,7 @@ export default function (pi: ExtensionAPI) {
     }, timeoutSec * 1000);
 
     if (proc.pid) {
-      jobs.set(proc.pid, { pid: proc.pid, command: displayCommand, startedAt: Date.now() });
+      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now() });
       syncStatus(ctx);
     }
 
@@ -111,14 +122,18 @@ export default function (pi: ExtensionAPI) {
 
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
       const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
-      const msg = `${heading}\nTask: ${displayCommand}${reason}${result}${troubleshooting}`;
-      let isIdle = false;
-      try { isIdle = ctx.isIdle(); } catch {}
+      const msg = `${heading}\nTask: ${shownCommand}${reason}${result}${troubleshooting}`;
       try {
-        pi.sendMessage(
-          { customType: "pi-bg-result", content: msg, display: true },
-          isIdle ? undefined : { deliverAs: "followUp" },
-        );
+        if (includeInContext) {
+          let isIdle = false;
+          try { isIdle = ctx.isIdle(); } catch {}
+          pi.sendMessage(
+            { customType: "pi-bg-result", content: msg, display: true },
+            isIdle ? undefined : { deliverAs: "followUp" },
+          );
+        } else {
+          pi.appendEntry("pi-bg-result", { content: msg });
+        }
         if (!keepLog) unlinkSync(logFile);
       } catch (error) {
         console.error(`pi-bg could not deliver a result. Full result: ${logFile}`, error);
@@ -129,9 +144,10 @@ export default function (pi: ExtensionAPI) {
     return {
       content: [{
         type: "text",
-        text: `Started: ${displayCommand}\nYou can keep working. The result will appear here when it is ready. Use /bg to view or stop the task.`,
+        text: `Started: ${shownCommand}\nThe result will appear here when it is ready. Use /bg to view or stop the task.`,
       }],
       details: { pid: proc.pid, logFile },
+      terminate: true,
     };
   }
 
@@ -199,14 +215,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "bg",
-    description: "Execute a shell command asynchronously in the background.",
-    promptSnippet: "bg: Execute bash commands in background without blocking execution.",
-    promptGuidelines: [
-      "Use bg tool instead of bash for long-running shell commands, servers, builds, test suites, or tasks that take time to execute.",
-    ],
+    label: "Background",
+    description: "Run a shell command in the background.",
+    promptGuidelines: ["Use bg for long-running commands."],
     parameters: Type.Object({
-      command: Type.String({ description: "Bash command to run in background" }),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Max run time in seconds before auto-kill (default: 600)" })),
+      command: Type.String({ description: "Shell command" }),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
       return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
@@ -215,21 +229,18 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "subagent",
-    description: "Delegate a task to an isolated background Pi process with optional model, thinking effort, system prompt, and tool restrictions.",
-    promptSnippet: "subagent: Delegate specialized tasks to an isolated background subagent process.",
-    promptGuidelines: [
-      "Use subagent tool to delegate specialized research, code review, exploration, or parallel tasks to an isolated subagent with its own context window.",
-    ],
+    label: "Subagent",
+    description: "Run a task in a separate background Pi process.",
+    promptGuidelines: ["Use subagent for isolated or parallel work. Restrict tools to those needed."],
     parameters: Type.Object({
-      prompt: Type.String({ description: "Detailed task instructions for the subagent" }),
-      description: Type.Optional(Type.String({ description: "Short (3-5 word) summary label for display in task manager" })),
-      model: Type.Optional(Type.String({ description: "Preferred model pattern or ID; falls back to the parent model, then Pi's scoped/default models" })),
-      thinking: Type.Optional(Type.String({ pattern: "^(off|minimal|low|medium|high|xhigh|max)$", description: "Thinking level" })),
-      systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt persona instructions for the subagent" })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated allowlist of tools for the subagent (e.g. 'read,grep,find,ls')" })),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Max run time in seconds before auto-kill (default: 600)" })),
+      prompt: Type.String({ description: "Task" }),
+      model: Type.Optional(Type.String({ description: "Preferred model" })),
+      thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
+      systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
     }),
-    async execute(id, { prompt, description, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
       const exact = requested && available.find((m) =>
@@ -242,7 +253,7 @@ export default function (pi: ExtensionAPI) {
       const selected = requestedModel ??
         (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
 
-      const args = ["-p", "--no-session"];
+      const args = ["-p", "--no-session", ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
       const cleanupFiles: string[] = [];
       if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
       if (thinking) args.push("--thinking", thinking);
@@ -256,11 +267,11 @@ export default function (pi: ExtensionAPI) {
       if (tools) args.push("--tools", tools);
       args.push(prompt);
 
-      const label = description || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
+      const label = prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt;
       const displayCmd = `Subagent: ${label}`;
       const [file, invocationArgs] = getPiInvocation(args);
       try {
-        return runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles);
+        return runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true);
       } catch (error) {
         for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
         throw error;

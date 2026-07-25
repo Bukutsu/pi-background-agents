@@ -42,12 +42,11 @@ Run a long process without blocking execution:
 
 ### Subagent Delegation
 
-Delegate work to an isolated subagent process with custom model, thinking effort, persona, or restricted tools:
+Delegate work to an isolated subagent process with the same extensions and default tools as the main agent. Pass `tools` only to restrict it:
 
 ```json
 {
   "prompt": "Inspect auth module for security issues",
-  "description": "Security Audit",
   "model": "anthropic/claude-3-5-haiku",
   "thinking": "low",
   "tools": "read,grep,find,ls"
