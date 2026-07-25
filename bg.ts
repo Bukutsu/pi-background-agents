@@ -1,7 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn } from "node:child_process";
-import { openSync, readFileSync } from "node:fs";
+import { openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 interface BgJob {
   pid: number;
@@ -26,9 +28,13 @@ export default function (pi: ExtensionAPI) {
 
   function killJob(pid: number): boolean {
     if (!jobs.has(pid)) return false;
-    try { process.kill(-pid, "SIGKILL"); } catch {
-      try { process.kill(pid, "SIGKILL"); } catch {}
-    }
+    try {
+      if (process.platform === "win32") {
+        try { process.kill(pid, "SIGKILL"); } catch { spawn("taskkill", ["/F", "/PID", String(pid), "/T"]); }
+      } else {
+        try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+      }
+    } catch {}
     jobs.delete(pid);
     return true;
   }
@@ -40,7 +46,7 @@ export default function (pi: ExtensionAPI) {
     timeoutSec: number,
     ctx: any
   ) {
-    const logFile = `/tmp/pi-bg-${Date.now()}.log`;
+    const logFile = join(tmpdir(), `pi-bg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
     const out = openSync(logFile, "a");
     const proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
     proc.unref();
@@ -94,7 +100,20 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_e, ctx) => {
     syncStatus(ctx);
-    spawn("find", ["/tmp", "-name", "pi-bg-*.log", "-mtime", "+1", "-delete"], { detached: true, stdio: "ignore" }).unref();
+    try {
+      const now = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+      const dir = tmpdir();
+      for (const file of readdirSync(dir)) {
+        if (file.startsWith("pi-bg-") && file.endsWith(".log")) {
+          const fullPath = join(dir, file);
+          try {
+            const stat = statSync(fullPath);
+            if (now - stat.mtimeMs > dayMs) unlinkSync(fullPath);
+          } catch {}
+        }
+      }
+    } catch {}
   });
 
   pi.on("session_shutdown", () => {
@@ -158,7 +177,10 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
+      const isWin = process.platform === "win32";
+      const shell = isWin ? (process.env.ComSpec || "cmd.exe") : "bash";
+      const args = isWin ? ["/d", "/s", "/c", command] : ["-c", command];
+      return runBgProcess(shell, args, command, timeoutSec, ctx);
     },
   });
 
