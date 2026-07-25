@@ -150,12 +150,14 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Task prompt for the subagent" }),
       model: Type.Optional(Type.String({ description: "Model pattern or ID (e.g. 'anthropic/claude-3-5-haiku', 'openai/gpt-4o-mini')" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
+      systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt for the subagent" })),
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
-    async execute(id, { prompt, model, thinking, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, model, thinking, systemPrompt, timeoutSec = 600 }, _sig, _up, ctx) {
       const args = ["-p"];
       if (model) args.push("--model", model);
       if (thinking) args.push("--thinking", thinking);
+      if (systemPrompt) args.push("--system-prompt", systemPrompt);
       args.push(prompt);
 
       const displayCmd = `pi subagent: "${prompt.slice(0, 30)}${prompt.length > 30 ? "..." : ""}"`;
