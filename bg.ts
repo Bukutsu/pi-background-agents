@@ -102,12 +102,16 @@ export default function (pi: ExtensionAPI) {
         syncStatus(ctx);
       }
 
-      proc.on("exit", (code) => {
+      proc.on("exit", (code, signal) => {
         clearTimeout(timer);
         if (proc.pid) jobs.delete(proc.pid);
         syncStatus(ctx);
 
-        const status = timedOut ? `TIMED OUT after ${timeoutSec}s` : `exit ${code}`;
+        const status = timedOut
+          ? `TIMED OUT after ${timeoutSec}s`
+          : code !== null
+          ? `exit ${code}`
+          : `killed (${signal})`;
         const msg = `[Background Job ${proc.pid}] ${status}. Command: "${command}". Log: ${logFile}`;
         let isIdle = false;
         try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
