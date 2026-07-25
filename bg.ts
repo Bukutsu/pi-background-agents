@@ -13,9 +13,37 @@ interface BgJob {
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
 
-  function syncStatus(ctx: any) {
+  const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let spinnerIndex = 0;
+  let spinnerInterval: ReturnType<typeof setInterval> | null = null;
+  let lastCtx: any = null;
+
+  function syncStatus(ctx?: any) {
+    if (ctx) lastCtx = ctx;
+    const currentCtx = lastCtx;
+    if (!currentCtx) return;
+
+    if (jobs.size === 0) {
+      if (spinnerInterval) {
+        clearInterval(spinnerInterval);
+        spinnerInterval = null;
+      }
+      try {
+        currentCtx?.ui?.setStatus("bg-jobs", undefined);
+      } catch {}
+      return;
+    }
+
+    if (!spinnerInterval) {
+      spinnerInterval = setInterval(() => {
+        spinnerIndex = (spinnerIndex + 1) % SPINNER.length;
+        syncStatus();
+      }, 80);
+    }
+
     try {
-      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${jobs.size} bg` : undefined);
+      const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", `${SPINNER[spinnerIndex]} `) : `${SPINNER[spinnerIndex]} `;
+      currentCtx?.ui?.setStatus("bg-jobs", `${icon}${jobs.size} bg`);
     } catch {}
   }
 
@@ -83,6 +111,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    if (spinnerInterval) {
+      clearInterval(spinnerInterval);
+      spinnerInterval = null;
+    }
     for (const pid of Array.from(jobs.keys())) {
       killJob(pid);
     }
