@@ -23,23 +23,10 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ description: "Max run time in seconds before auto-kill (default: 600)" })),
     }),
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      if (!command?.trim()) throw new Error("Command cannot be empty");
-
       const logFile = `/tmp/pi-bg-${Date.now()}.log`;
-      let out: number;
-      try {
-        out = openSync(logFile, "a");
-      } catch (err: any) {
-        throw new Error(`Failed to open log file: ${err.message}`);
-      }
-
-      let proc;
-      try {
-        proc = spawn("bash", ["-c", command], { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
-        proc.unref();
-      } catch (err: any) {
-        throw new Error(`Failed to spawn background command: ${err.message}`);
-      }
+      const out = openSync(logFile, "a");
+      const proc = spawn("bash", ["-c", command], { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
+      proc.unref();
 
       let timedOut = false;
       const timer = setTimeout(() => {
