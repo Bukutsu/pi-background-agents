@@ -7,7 +7,9 @@ export default function (pi: ExtensionAPI) {
   const pids = new Set<number>();
 
   function syncStatus(ctx: any) {
-    ctx?.ui?.setStatus("bg-jobs", pids.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${pids.size} bg` : undefined);
+    try {
+      ctx?.ui?.setStatus("bg-jobs", pids.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${pids.size} bg` : undefined);
+    } catch {}
   }
 
   pi.on("session_start", (_e, ctx) => {
@@ -48,7 +50,11 @@ export default function (pi: ExtensionAPI) {
 
         const status = timedOut ? `TIMED OUT after ${timeoutSec}s` : `exit ${code}`;
         const msg = `[Background Job ${proc.pid}] ${status}. Command: "${command}". Log: ${logFile}`;
-        pi.sendUserMessage(msg, { deliverAs: ctx?.isIdle?.() === false ? "followUp" : undefined });
+        let isIdle = false;
+        try { isIdle = ctx?.isIdle?.() ?? true; } catch {}
+        try {
+          pi.sendUserMessage(msg, { deliverAs: isIdle ? undefined : "followUp" });
+        } catch {}
       });
 
       return {
