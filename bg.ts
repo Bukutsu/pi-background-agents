@@ -20,15 +20,7 @@ export default function (pi: ExtensionAPI) {
     if (!currentCtx) return;
 
     try {
-      if (jobs.size > 0) {
-        const icon = currentCtx.ui?.theme ? currentCtx.ui.theme.fg("accent", "● ") : "● ";
-        const widgetLine = `${icon}${jobs.size} background task${jobs.size > 1 ? "s" : ""} running`;
-        currentCtx?.ui?.setWidget("bg-jobs", [widgetLine]);
-        currentCtx?.ui?.setStatus("bg-jobs", `${icon}${jobs.size} bg`);
-      } else {
-        currentCtx?.ui?.setWidget("bg-jobs", undefined);
-        currentCtx?.ui?.setStatus("bg-jobs", undefined);
-      }
+      currentCtx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${currentCtx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
     } catch {}
   }
 
