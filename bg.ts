@@ -84,7 +84,12 @@ export default function (pi: ExtensionAPI) {
       let result = "";
       try {
         const content = readFileSync(logFile, "utf-8").trim();
-        if (content) result = `\n\nResult:\n${content.slice(-2000)}`;
+        if (content.length > 2000) {
+          const preview = content.slice(0, 2000).replace(/\s+\S*$/, "");
+          result = `\n\nResult:\n${preview}\n\nThe result was shortened. Full result: ${logFile}`;
+        } else if (content) {
+          result = `\n\nResult:\n${content}`;
+        }
       } catch {}
 
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
