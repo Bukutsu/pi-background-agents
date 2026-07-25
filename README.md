@@ -2,16 +2,19 @@
 
 Background execution and subagent delegation for [Pi Coding Agent](https://pi.dev).
 
-Runs long commands and delegated tasks asynchronously so your main conversation stays responsive and your context window stays clean.
+Runs long shell commands and delegated subagents asynchronously so your main conversation stays fast, responsive, and uncluttered.
 
-## Features
+## Why pi-bg?
 
-- **`bg` tool**: Runs bash commands in the background without blocking the main agent.
-- **`subagent` tool**: Delegates tasks to isolated subagent processes with optional model, thinking level, system prompt, and tool restrictions.
-- **`/bg` command**: Interactive menu to check and stop active jobs.
-- **Status bar**: Minimal `● N bg` indicator in Pi's status bar.
-- **Automatic completion updates**: Delivers job results directly to the chat when tasks finish or time out.
-- **Zero dependencies**: Uses Node.js standard libraries only.
+Most subagent extensions are heavy, monolithic frameworks that force you to write complex YAML config files, maintain custom agent presets, or install extra runtime dependencies just to run tasks in the background.
+
+`pi-bg` takes a simpler approach:
+
+- **One lightweight runner for everything**: Handles both long-running bash processes (dev servers, test suites, builds) and subagent tasks under one extension.
+- **Zero runtime dependencies**: Built entirely on Node.js standard libraries (`child_process`, `fs`).
+- **No config files required**: Delegate tasks directly with optional model, effort, system prompt, or tool restrictions right in the tool call.
+- **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--system-prompt`, `--tools`).
+- **Automatic result delivery**: Subagent outputs are delivered straight to your session when complete, saving extra log-reading turns.
 
 ## Installation
 
@@ -21,14 +24,14 @@ pi install git:github.com/Bukutsu/pi-bg
 
 ## Usage
 
-### Interactive Command
+### Interactive Management
 
-- Type `/bg` to pick and stop active tasks.
-- Type `/bg kill <pid>` to stop a task by PID.
+- Type `/bg` to open the interactive menu and stop running tasks.
+- Type `/bg kill <pid>` to stop a task by PID directly.
 
-### Tools
+### Background Bash Commands
 
-Run a command in the background:
+Run a long process without blocking execution:
 
 ```json
 {
@@ -37,7 +40,9 @@ Run a command in the background:
 }
 ```
 
-Delegate a task to a subagent with custom model, effort, or restricted tools:
+### Subagent Delegation
+
+Delegate work to an isolated subagent process with custom model, thinking effort, persona, or restricted tools:
 
 ```json
 {
