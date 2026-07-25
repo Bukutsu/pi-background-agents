@@ -3,18 +3,77 @@ import { Type } from "typebox";
 import { spawn } from "node:child_process";
 import { openSync } from "node:fs";
 
+interface BgJob {
+  pid: number;
+  command: string;
+  logFile: string;
+  startedAt: number;
+}
+
 export default function (pi: ExtensionAPI) {
-  const pids = new Set<number>();
+  const jobs = new Map<number, BgJob>();
 
   function syncStatus(ctx: any) {
     try {
-      ctx?.ui?.setStatus("bg-jobs", pids.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${pids.size} bg` : undefined);
+      ctx?.ui?.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "⚙ ")}${jobs.size} bg` : undefined);
     } catch {}
+  }
+
+  function killJob(pid: number): boolean {
+    if (!jobs.has(pid)) return false;
+    try { process.kill(-pid, "SIGKILL"); } catch {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+    jobs.delete(pid);
+    return true;
   }
 
   pi.on("session_start", (_e, ctx) => {
     syncStatus(ctx);
     spawn("find", ["/tmp", "-name", "pi-bg-*.log", "-mtime", "+1", "-delete"], { detached: true, stdio: "ignore" }).unref();
+  });
+
+  pi.registerCommand("bg", {
+    description: "List and manage background jobs",
+    handler: async (args, ctx) => {
+      const trimmed = args?.trim() ?? "";
+      if (trimmed.startsWith("kill ") || /^\d+$/.test(trimmed)) {
+        const pid = parseInt(trimmed.replace(/^kill\s+/, ""), 10);
+        if (killJob(pid)) {
+          ctx.ui.notify(`Killed background job ${pid}`, "info");
+          syncStatus(ctx);
+        } else {
+          ctx.ui.notify(`No background job found with PID ${pid}`, "error");
+        }
+        return;
+      }
+
+      if (jobs.size === 0) {
+        ctx.ui.notify("No background jobs running", "info");
+        return;
+      }
+
+      const items = Array.from(jobs.values()).map(
+        (j) => `[${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+      );
+
+      if (!ctx.hasUI) {
+        ctx.ui.notify(`Running background jobs:\n${items.join("\n")}`, "info");
+        return;
+      }
+
+      const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
+      if (choice && choice !== "Cancel") {
+        const match = choice.match(/^\[(\d+)\]/);
+        if (match) {
+          const pid = parseInt(match[1], 10);
+          if (killJob(pid)) {
+            ctx.ui.notify(`Stopped background job ${pid}`, "info");
+            syncStatus(ctx);
+          }
+        }
+      }
+    },
   });
 
   pi.registerTool({
@@ -32,20 +91,20 @@ export default function (pi: ExtensionAPI) {
 
       let timedOut = false;
       const timer = setTimeout(() => {
-        if (proc.pid && pids.has(proc.pid)) {
+        if (proc.pid && jobs.has(proc.pid)) {
           timedOut = true;
-          try { process.kill(-proc.pid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
+          killJob(proc.pid);
         }
       }, timeoutSec * 1000);
 
       if (proc.pid) {
-        pids.add(proc.pid);
+        jobs.set(proc.pid, { pid: proc.pid, command, logFile, startedAt: Date.now() });
         syncStatus(ctx);
       }
 
       proc.on("exit", (code) => {
         clearTimeout(timer);
-        if (proc.pid) pids.delete(proc.pid);
+        if (proc.pid) jobs.delete(proc.pid);
         syncStatus(ctx);
 
         const status = timedOut ? `TIMED OUT after ${timeoutSec}s` : `exit ${code}`;
