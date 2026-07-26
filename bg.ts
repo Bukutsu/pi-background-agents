@@ -10,7 +10,6 @@ import { basename, join } from "node:path";
 
 const LOG_DIR = join(tmpdir(), "pi-bg");
 const SUBAGENT_SESSION_DIR = join(LOG_DIR, "sessions");
-const MAX_TIMEOUT_SEC = 2_147_483;
 
 interface BgJob {
   pid: number;
@@ -113,7 +112,7 @@ export default function (pi: ExtensionAPI) {
   ) {
     const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-    const logFile = join(LOG_DIR, `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.log`);
+    const logFile = join(LOG_DIR, `${randomUUID()}.log`);
     const out = openSync(logFile, "wx", 0o600);
     let proc;
     try {
@@ -284,7 +283,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: ["Use bg for long-running commands. After starting it, continue other work; never wait, sleep, or poll for completion."],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command" }),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
     renderCall({ command }, theme) {
       const shown = command.length > 100 ? `${command.slice(0, 97)}...` : command;
@@ -312,7 +311,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_TIMEOUT_SEC, description: "Timeout in seconds (default: 600)" })),
+      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
     renderCall({ prompt }, theme) {
       const shown = prompt.length > 100 ? `${prompt.slice(0, 97)}...` : prompt;
@@ -345,7 +344,7 @@ export default function (pi: ExtensionAPI) {
       if (thinking) args.push("--thinking", thinking);
       if (systemPrompt) {
         mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-        const promptFile = join(LOG_DIR, `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.md`);
+        const promptFile = join(LOG_DIR, `prompt-${randomUUID()}.md`);
         writeFileSync(promptFile, systemPrompt, { mode: 0o600, flag: "wx" });
         cleanupFiles.push(promptFile);
         args.push("--append-system-prompt", promptFile);
