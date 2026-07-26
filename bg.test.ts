@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import extension, { getSubagentSession } from "./bg.ts";
+import extension, { formatStatus, getDeliveryOptions, getSubagentSession } from "./bg.ts";
 
 const tools = new Map<string, any>();
 const events = new Map<string, Function>();
@@ -27,6 +27,19 @@ async function waitForEntries(count: number) {
   for (let i = 0; i < 100 && entries.length < count; i++) await Bun.sleep(20);
   expect(entries.length).toBe(count);
 }
+
+test("completion delivery queues or continues when idle", () => {
+  expect(getDeliveryOptions(true, "queue")).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+  expect(getDeliveryOptions(true, "continue")).toEqual({ deliverAs: "steer", triggerTurn: true });
+  expect(getDeliveryOptions(false, "queue")).toEqual({ deliverAs: "steer", triggerTurn: false });
+});
+
+test("background status shows running and queued results", () => {
+  expect(formatStatus(0, 0)).toBe("");
+  expect(formatStatus(2, 0)).toBe("2 bg");
+  expect(formatStatus(0, 1)).toBe("1 bg done");
+  expect(formatStatus(2, 1)).toBe("2 bg · 1 bg done");
+});
 
 test("subagent sessions are generated or reused", () => {
   const fresh = getSubagentSession();

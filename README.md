@@ -14,7 +14,7 @@ Most subagent extensions are heavy, monolithic frameworks that force you to writ
 - **No third-party runtime dependencies**: Uses Node.js standard libraries and Pi's bundled peer packages.
 - **No config files required**: Delegate tasks directly with optional model, effort, system prompt, or tool restrictions right in the tool call.
 - **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--append-system-prompt`, `--tools`).
-- **Non-blocking result delivery**: Subagent outputs join active work when useful; idle completions wait for your next prompt instead of starting a turn.
+- **Non-blocking result delivery**: Subagent outputs join active work when useful; idle completions show `bg done` in the status line and wait for your next prompt instead of starting a turn.
 - **Persistent follow-ups**: Reuse a returned session ID to continue the same subagent with its existing context.
 
 ## Installation
@@ -60,5 +60,14 @@ The result includes a session ID. Pass it back to continue the same subagent aft
 {
   "prompt": "Now fix the highest-severity issue",
   "sessionId": "the-returned-session-id"
+}
+```
+
+Completions wait for your next prompt by default. Use `"completion": "continue"` only when the parent should wake and autonomously consume the result:
+
+```json
+{
+  "prompt": "Research the API needed for the implementation",
+  "completion": "continue"
 }
 ```

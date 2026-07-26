@@ -24,8 +24,20 @@ export function getSubagentSession(sessionId?: string) {
   return { id, args: ["--session-id", id] };
 }
 
+export function formatStatus(running: number, pending: number) {
+  return [running && `${running} bg`, pending && `${pending} bg done`].filter(Boolean).join(" · ");
+}
+
+export function getDeliveryOptions(isIdle: boolean, completion: "queue" | "continue") {
+  return {
+    deliverAs: isIdle && completion === "queue" ? "nextTurn" as const : "steer" as const,
+    triggerTurn: isIdle && completion === "continue",
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
+  let pendingResults = 0;
 
   const renderMessage = (content: string, theme: Theme, padding: number) => {
     const newline = content.indexOf("\n");
@@ -48,7 +60,8 @@ export default function (pi: ExtensionAPI) {
 
   function syncStatus(ctx: ExtensionContext) {
     try {
-      ctx.ui.setStatus("bg-jobs", jobs.size > 0 ? `${ctx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
+      const status = formatStatus(jobs.size, pendingResults);
+      ctx.ui.setStatus("bg-jobs", status ? `${ctx.ui.theme.fg("accent", "● ")}${status}` : undefined);
     } catch {}
   }
 
@@ -90,7 +103,8 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     cleanupFiles: string[] = [],
     includeInContext = false,
-    sessionId?: string
+    sessionId?: string,
+    completion: "queue" | "continue" = "queue"
   ) {
     const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -156,8 +170,12 @@ export default function (pi: ExtensionAPI) {
           try { isIdle = ctx.isIdle(); } catch {}
           pi.sendMessage(
             { customType: "pi-bg-result", content: msg, display: true },
-            { deliverAs: isIdle ? "nextTurn" : "steer" },
+            getDeliveryOptions(isIdle, completion),
           );
+          if (isIdle && completion === "queue") {
+            pendingResults++;
+            syncStatus(ctx);
+          }
         } else {
           pi.appendEntry("pi-bg-result", { content: msg });
         }
@@ -188,6 +206,13 @@ export default function (pi: ExtensionAPI) {
         } catch {}
       }
     } catch {}
+  });
+
+  pi.on("before_agent_start", (_e, ctx) => {
+    if (pendingResults) {
+      pendingResults = 0;
+      syncStatus(ctx);
+    }
   });
 
   pi.on("session_shutdown", () => {
@@ -273,10 +298,11 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Run a task in a separate background Pi process. Pass sessionId from an earlier result to continue that subagent.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
+    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Set completion to continue only when you must consume the result and keep working without user input; otherwise queue it. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
       sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
+      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "queue waits for the user's next prompt (default); continue wakes the parent for autonomous orchestration" })),
       model: Type.Optional(Type.String({ description: "Preferred model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
@@ -291,7 +317,7 @@ export default function (pi: ExtensionAPI) {
       const model = result.details?.model ? theme.fg("dim", ` (${result.details.model})`) : "";
       return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
     },
-    async execute(id, { prompt, sessionId, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, sessionId, completion = "queue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
       const exact = requested && available.find((m) =>
@@ -326,7 +352,7 @@ export default function (pi: ExtensionAPI) {
       const displayCmd = `Subagent: ${label}`;
       const [file, invocationArgs] = getPiInvocation(args);
       try {
-        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id);
+        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id, completion);
         const selectedModel = selected ? `${selected.provider}/${selected.id}` : "Pi automatic selection";
         job.content[0].text += `\nSession: ${session.id}\nModel: ${selectedModel}`;
         return { ...job, details: { ...job.details, sessionId: session.id, model: selectedModel } };
