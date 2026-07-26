@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 const LOG_DIR = join(tmpdir(), "pi-bg");
+const SUBAGENT_SESSION_DIR = join(LOG_DIR, "sessions");
 const MAX_TIMEOUT_SEC = 2_147_483;
 
 interface BgJob {
@@ -20,8 +21,12 @@ interface BgJob {
 }
 
 export function getSubagentSession(sessionId?: string) {
+  const isCustom = Boolean(sessionId?.trim());
   const id = sessionId?.trim() || randomUUID();
-  return { id, args: ["--session-id", id] };
+  const args = isCustom
+    ? ["--session-id", id, "--session-dir", SUBAGENT_SESSION_DIR]
+    : ["--no-session", "--session-id", id];
+  return { id, args };
 }
 
 export function formatStatus(running: number, pending: number) {

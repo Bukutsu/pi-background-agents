@@ -44,9 +44,12 @@ test("background status shows running and queued results", () => {
 test("subagent sessions are generated or reused", () => {
   const fresh = getSubagentSession();
   expect(fresh.id).toMatch(/^[0-9a-f-]{36}$/);
-  expect(fresh.args).toEqual(["--session-id", fresh.id]);
+  expect(fresh.args).toEqual(["--no-session", "--session-id", fresh.id]);
   const existing = "123e4567-e89b-42d3-a456-426614174000";
-  expect(getSubagentSession(` ${existing} `)).toEqual({ id: existing, args: ["--session-id", existing] });
+  expect(getSubagentSession(` ${existing} `)).toEqual({
+    id: existing,
+    args: ["--session-id", existing, "--session-dir", expect.stringMatching(/pi-bg[/\\]sessions$/)],
+  });
 });
 
 test("background job lifecycle", async () => {
