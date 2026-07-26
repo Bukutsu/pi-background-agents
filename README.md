@@ -15,6 +15,7 @@ Most subagent extensions are heavy, monolithic frameworks that force you to writ
 - **No config files required**: Delegate tasks directly with optional model, effort, system prompt, or tool restrictions right in the tool call.
 - **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--append-system-prompt`, `--tools`).
 - **Automatic result delivery**: Subagent outputs are delivered straight to your session when complete, saving extra log-reading turns.
+- **Persistent follow-ups**: Reuse a returned session ID to continue the same subagent with its existing context.
 
 ## Installation
 
@@ -26,8 +27,8 @@ pi install git:github.com/Bukutsu/pi-bg
 
 ### Interactive Management
 
-- Type `/bg` to open the interactive menu and stop running tasks.
-- Type `/bg kill <pid>` to stop a task by PID directly.
+- Type `/bg` to inspect running tasks, including shortened subagent session IDs, and stop one.
+- Type `/bg kill <pid>` to interrupt a task by PID directly. Subagents retain their session for follow-up; unresponsive processes are force-killed after two seconds.
 
 ### Background Bash Commands
 
@@ -50,5 +51,14 @@ Delegate work to an isolated subagent process with the same extensions and defau
   "model": "anthropic/claude-3-5-haiku",
   "thinking": "low",
   "tools": "read,grep,find,ls"
+}
+```
+
+The result includes a session ID. Pass it back to continue the same subagent after its current turn finishes. Concurrent turns on one session are rejected:
+
+```json
+{
+  "prompt": "Now fix the highest-severity issue",
+  "sessionId": "the-returned-session-id"
 }
 ```

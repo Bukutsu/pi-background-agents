@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import extension from "./bg.ts";
+import extension, { getSubagentSession } from "./bg.ts";
 
 const tools = new Map<string, any>();
 const events = new Map<string, Function>();
@@ -27,6 +27,14 @@ async function waitForEntries(count: number) {
   for (let i = 0; i < 100 && entries.length < count; i++) await Bun.sleep(20);
   expect(entries.length).toBe(count);
 }
+
+test("subagent sessions are generated or reused", () => {
+  const fresh = getSubagentSession();
+  expect(fresh.id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(fresh.args).toEqual(["--session-id", fresh.id]);
+  const existing = "123e4567-e89b-42d3-a456-426614174000";
+  expect(getSubagentSession(` ${existing} `)).toEqual({ id: existing, args: ["--session-id", existing] });
+});
 
 test("background job lifecycle", async () => {
   const bg = tools.get("bg");

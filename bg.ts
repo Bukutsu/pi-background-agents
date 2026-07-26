@@ -3,6 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -14,6 +15,13 @@ interface BgJob {
   pid: number;
   command: string;
   startedAt: number;
+  sessionId?: string;
+  stopping?: boolean;
+}
+
+export function getSubagentSession(sessionId?: string) {
+  const id = sessionId?.trim() || randomUUID();
+  return { id, args: ["--session-id", id] };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -44,14 +52,20 @@ export default function (pi: ExtensionAPI) {
     } catch {}
   }
 
-  function killJob(pid: number): boolean {
-    if (!jobs.has(pid)) return false;
+  function killJob(pid: number, graceful = true): boolean {
+    const job = jobs.get(pid);
+    if (!job) return false;
     try {
       if (process.platform === "win32") {
-        const result = spawnSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
+        const result = spawnSync("taskkill", [graceful ? "/T" : "/F", "/PID", String(pid)], { stdio: "ignore" });
         return !result.error && result.status === 0;
       }
-      try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+      const signal = graceful ? "SIGINT" : "SIGKILL";
+      try { process.kill(-pid, signal); } catch { process.kill(pid, signal); }
+      if (graceful && !job.stopping) {
+        job.stopping = true;
+        setTimeout(() => { if (jobs.has(pid)) killJob(pid, false); }, 2000).unref();
+      }
       return true;
     } catch {
       return false;
@@ -75,7 +89,8 @@ export default function (pi: ExtensionAPI) {
     timeoutSec: number,
     ctx: ExtensionContext,
     cleanupFiles: string[] = [],
-    includeInContext = false
+    includeInContext = false,
+    sessionId?: string
   ) {
     const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -100,7 +115,7 @@ export default function (pi: ExtensionAPI) {
     }, timeoutSec * 1000);
 
     if (proc.pid) {
-      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now() });
+      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now(), sessionId });
       syncStatus(ctx);
     }
 
@@ -176,7 +191,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
-    for (const pid of jobs.keys()) killJob(pid);
+    for (const pid of jobs.keys()) killJob(pid, false);
   });
 
   pi.registerCommand("bg", {
@@ -213,7 +228,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const items = Array.from(jobs.values()).map(
-        (j) => `⚙ [${j.pid}] ${j.command} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+        (j) => `⚙ [${j.pid}] ${j.command}${j.sessionId ? ` [session: ${j.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
       );
 
       if (!ctx.hasUI) return;
@@ -257,10 +272,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Run a task in a separate background Pi process.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
+    description: "Run a task in a separate background Pi process. Pass sessionId from an earlier result to continue that subagent.",
+    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
+      sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
       model: Type.Optional(Type.String({ description: "Preferred model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
@@ -275,7 +291,7 @@ export default function (pi: ExtensionAPI) {
       const model = result.details?.model ? theme.fg("dim", ` (${result.details.model})`) : "";
       return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
     },
-    async execute(id, { prompt, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, sessionId, model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
       const exact = requested && available.find((m) =>
@@ -288,7 +304,11 @@ export default function (pi: ExtensionAPI) {
       const selected = requestedModel ??
         (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
 
-      const args = ["-p", "--no-session", ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
+      const session = getSubagentSession(sessionId);
+      if (Array.from(jobs.values()).some((job) => job.sessionId === session.id)) {
+        throw new Error(`Subagent session ${session.id} is already running`);
+      }
+      const args = ["-p", ...session.args, ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
       const cleanupFiles: string[] = [];
       if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
       if (thinking) args.push("--thinking", thinking);
@@ -306,10 +326,10 @@ export default function (pi: ExtensionAPI) {
       const displayCmd = `Subagent: ${label}`;
       const [file, invocationArgs] = getPiInvocation(args);
       try {
-        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true);
+        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id);
         const selectedModel = selected ? `${selected.provider}/${selected.id}` : "Pi automatic selection";
-        job.content[0].text += `\nModel: ${selectedModel}`;
-        return { ...job, details: { ...job.details, model: selectedModel } };
+        job.content[0].text += `\nSession: ${session.id}\nModel: ${selectedModel}`;
+        return { ...job, details: { ...job.details, sessionId: session.id, model: selectedModel } };
       } catch (error) {
         for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
         throw error;
