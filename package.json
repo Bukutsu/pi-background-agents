@@ -10,13 +10,19 @@
     "pi-package",
     "pi-extension",
     "background",
-    "bash-bg"
+    "subagent",
+    "bash-bg",
+    "async"
   ],
   "license": "MIT",
   "author": "Bukutsu",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Bukutsu/pi-bg.git"
+  },
+  "homepage": "https://github.com/Bukutsu/pi-bg#readme",
+  "bugs": {
+    "url": "https://github.com/Bukutsu/pi-bg/issues"
   },
   "pi": {
     "extensions": [
