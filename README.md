@@ -14,7 +14,7 @@ Most subagent extensions are heavy, monolithic frameworks that force you to writ
 - **No third-party runtime dependencies**: Uses Node.js standard libraries and Pi's bundled peer packages.
 - **No config files required**: Delegate tasks directly with optional model, effort, system prompt, or tool restrictions right in the tool call.
 - **Native CLI flags**: Uses standard `pi -p` flags under the hood (`--model`, `--thinking`, `--append-system-prompt`, `--tools`).
-- **Automatic result delivery**: Subagent outputs are delivered straight to your session when complete, saving extra log-reading turns.
+- **Non-blocking result delivery**: Subagent outputs join active work when useful; idle completions wait for your next prompt instead of starting a turn.
 - **Persistent follow-ups**: Reuse a returned session ID to continue the same subagent with its existing context.
 
 ## Installation

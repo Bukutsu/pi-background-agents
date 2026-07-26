@@ -156,7 +156,7 @@ export default function (pi: ExtensionAPI) {
           try { isIdle = ctx.isIdle(); } catch {}
           pi.sendMessage(
             { customType: "pi-bg-result", content: msg, display: true },
-            { deliverAs: "steer", triggerTurn: isIdle },
+            { deliverAs: isIdle ? "nextTurn" : "steer" },
           );
         } else {
           pi.appendEntry("pi-bg-result", { content: msg });
