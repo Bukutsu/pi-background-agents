@@ -178,6 +178,9 @@ export default function (pi: ExtensionAPI) {
                       if (part?.type === "text" && part.text) texts.push(part.text);
                     }
                   }
+                  if (msg.errorMessage) {
+                    texts.push(`Error: ${msg.errorMessage}`);
+                  }
                   if (msg.usage) {
                     input += msg.usage.input || 0;
                     output += msg.usage.output || 0;
