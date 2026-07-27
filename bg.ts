@@ -108,7 +108,8 @@ export default function (pi: ExtensionAPI) {
     cleanupFiles: string[] = [],
     includeInContext = false,
     sessionId?: string,
-    completion: "queue" | "continue" = "queue"
+    completion: "queue" | "continue" = "queue",
+    isSubagent = false,
   ) {
     const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -153,17 +154,82 @@ export default function (pi: ExtensionAPI) {
         : "Background task failed";
       let result = "";
       let keepLog = code !== 0 || Boolean(spawnError);
+      let parsedUsage: any = undefined;
+
       try {
         const content = readFileSync(logFile, "utf-8").trim();
-        if (content.length > 2000) {
+
+        if (isSubagent && content) {
+          const lines = content.split("\n");
+          const texts: string[] = [];
+          let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, costTotal = 0;
+          let foundJson = false;
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line);
+              if (event && typeof event === "object") {
+                foundJson = true;
+                if (event.type === "message_end" && event.message?.role === "assistant") {
+                  const msg = event.message;
+                  if (Array.isArray(msg.content)) {
+                    for (const part of msg.content) {
+                      if (part?.type === "text" && part.text) texts.push(part.text);
+                    }
+                  }
+                  if (msg.usage) {
+                    input += msg.usage.input || 0;
+                    output += msg.usage.output || 0;
+                    cacheRead += msg.usage.cacheRead || 0;
+                    cacheWrite += msg.usage.cacheWrite || 0;
+                    costTotal += (typeof msg.usage.cost === "object" ? msg.usage.cost?.total : msg.usage.cost) || 0;
+                  }
+                }
+              }
+            } catch {}
+          }
+
+          if (foundJson) {
+            const outText = texts.join("\n").trim();
+            result = outText ? `\n\nResult:\n${outText}` : "";
+            const totalTokens = input + output + cacheRead + cacheWrite;
+            if (totalTokens > 0 || costTotal > 0) {
+              parsedUsage = {
+                input,
+                output,
+                cacheRead,
+                cacheWrite,
+                totalTokens,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
+              };
+            }
+          }
+        }
+
+        if (!parsedUsage && content.length > 2000) {
           const head = content.slice(0, 1000).replace(/\s+\S*$/, "");
           const tail = content.slice(-1000).replace(/^\S*\s+/, "");
           result = `\n\nResult:\n${head}\n\n[Middle omitted]\n\n${tail}\n\nThe result was shortened. Full result: ${logFile}`;
           keepLog = true;
-        } else if (content) {
+        } else if (!parsedUsage && content) {
           result = `\n\nResult:\n${content}`;
         }
       } catch {}
+
+      if (parsedUsage) {
+        try {
+          (ctx.sessionManager as any).appendMessage({
+            role: "toolResult",
+            toolCallId: randomUUID(),
+            toolName: "subagent",
+            content: [{ type: "text", text: `[Subagent usage recorded]` }],
+            usage: parsedUsage,
+            isError: code !== 0,
+            timestamp: Date.now(),
+          });
+        } catch {}
+      }
 
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
       const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
@@ -338,7 +404,7 @@ export default function (pi: ExtensionAPI) {
       if (Array.from(jobs.values()).some((job) => job.sessionId === session.id)) {
         throw new Error(`Subagent session ${session.id} is already running`);
       }
-      const args = ["-p", ...session.args, ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
+      const args = ["--mode", "json", "-p", ...session.args, ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
       const cleanupFiles: string[] = [];
       if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
       if (thinking) args.push("--thinking", thinking);
@@ -356,7 +422,7 @@ export default function (pi: ExtensionAPI) {
       const displayCmd = `Subagent: ${label}`;
       const [file, invocationArgs] = getPiInvocation(args);
       try {
-        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id, completion);
+        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id, completion, true);
         const selectedModel = selected ? `${selected.provider}/${selected.id}` : "Pi automatic selection";
         job.content[0].text += `\nSession: ${session.id}\nModel: ${selectedModel}`;
         return { ...job, details: { ...job.details, sessionId: session.id, model: selectedModel } };
