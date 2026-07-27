@@ -218,6 +218,11 @@ export default function (pi: ExtensionAPI) {
       } catch {}
 
       if (parsedUsage) {
+        const u = parsedUsage;
+        const tokens = `↑${u.input} ↓${u.output}${u.cacheRead ? ` R${u.cacheRead}` : ""}${u.cacheWrite ? ` W${u.cacheWrite}` : ""}`;
+        const costStr = u.cost.total > 0 ? ` ($${u.cost.total.toFixed(4)})` : "";
+        result += `\n\nSubagent Usage: ${tokens}${costStr}`;
+
         try {
           (ctx.sessionManager as any).appendMessage({
             role: "toolResult",
@@ -228,7 +233,9 @@ export default function (pi: ExtensionAPI) {
             isError: code !== 0,
             timestamp: Date.now(),
           });
-        } catch {}
+        } catch (e) {
+          console.error("Failed to append subagent toolResult usage", e);
+        }
       }
 
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
