@@ -62,17 +62,7 @@ export default function (pi: ExtensionAPI) {
     renderMessage(message.content, theme, outputPad)
   );
 
-  pi.on("tool_call", async (event) => {
-    if (event.toolName === "bash" && typeof (event.input as any)?.command === "string") {
-      const cmd = ((event.input as any).command as string).trim();
-      if (/^\s*(sleep\s+\d+|while\s+.*sleep|until\s+.*sleep|watch\s+)/i.test(cmd)) {
-        return {
-          block: true,
-          reason: "Do not use sleep or polling loops to wait for turns or background jobs. Background task results arrive automatically when ready.",
-        };
-      }
-    }
-  });
+  // Remove tool_call sleep blocker - triggerTurn: true handles turn wake-up cleanly
 
   function syncStatus(ctx: ExtensionContext) {
     try {
@@ -390,11 +380,11 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Run a task in a separate background Pi process. Pass sessionId from an earlier result to continue that subagent.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Set completion to continue only when you must consume the result and keep working without user input; otherwise queue it. Restrict tools to those needed. NEVER use sleep or polling commands after calling subagent; results arrive automatically."],
+    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Subagent completion automatically wakes up the session turn when ready."],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
       sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
-      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "queue waits for the user's next prompt (default); continue wakes the parent for autonomous orchestration" })),
+      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next prompt" })),
       model: Type.Optional(Type.String({ description: "Preferred model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
@@ -409,7 +399,7 @@ export default function (pi: ExtensionAPI) {
       const model = result.details?.model ? theme.fg("dim", ` (${result.details.model})`) : "";
       return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
     },
-    async execute(id, { prompt, sessionId, completion = "queue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { prompt, sessionId, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const available = ctx.modelRegistry.getAvailable();
       const requested = model?.trim().toLowerCase();
       const exact = requested && available.find((m) =>

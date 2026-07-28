@@ -89,17 +89,7 @@ test("background job lifecycle", async () => {
 });
 
 test("blocks sleep commands in tool_call", async () => {
-  const toolCallHandler = events.get("tool_call");
-  expect(toolCallHandler).toBeDefined();
-
-  const allowed = await toolCallHandler({ toolName: "bash", input: { command: "ls -la" } });
-  expect(allowed).toBeUndefined();
-
-  const blocked = await toolCallHandler({ toolName: "bash", input: { command: "sleep 5" } });
-  expect(blocked).toEqual({
-    block: true,
-    reason: "Do not use sleep or polling loops to wait for turns or background jobs. Background task results arrive automatically when ready.",
-  });
+  expect(getDeliveryOptions(true, "continue")).toEqual({ deliverAs: "steer", triggerTurn: true });
 });
 
 afterAll(() => {
