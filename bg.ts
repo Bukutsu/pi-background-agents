@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -68,6 +68,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const status = formatStatus(jobs.size, pendingResults);
       ctx.ui.setStatus("bg-jobs", status ? `${ctx.ui.theme.fg("accent", "● ")}${status}` : undefined);
+      try { ctx.ui.setTitle(jobs.size ? `pi [${jobs.size} bg]` : undefined); } catch {}
     } catch {}
   }
 
@@ -243,6 +244,18 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      try {
+        pi.events.emit("bg:task_end", {
+          pid: proc.pid,
+          command: shownCommand,
+          exitCode: code,
+          signal,
+          timedOut,
+          isSubagent,
+          sessionId,
+        });
+      } catch {}
+
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
       const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
       const msg = `${heading}\nTask: ${shownCommand}${reason}${result}${troubleshooting}`;
@@ -284,7 +297,14 @@ export default function (pi: ExtensionAPI) {
       for (const file of readdirSync(LOG_DIR)) {
         const fullPath = join(LOG_DIR, file);
         try {
-          if (now - statSync(fullPath).mtimeMs > 86_400_000) unlinkSync(fullPath);
+          const stat = statSync(fullPath);
+          if (now - stat.mtimeMs > 86_400_000) {
+            if (stat.isDirectory()) {
+              rmSync(fullPath, { recursive: true, force: true });
+            } else {
+              unlinkSync(fullPath);
+            }
+          }
         } catch {}
       }
     } catch {}
@@ -297,8 +317,41 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on("agent_settled", (_e, ctx) => {
+    if (pendingResults) {
+      pendingResults = 0;
+      syncStatus(ctx);
+    }
+  });
+
   pi.on("session_shutdown", () => {
     for (const pid of jobs.keys()) killJob(pid, false);
+  });
+
+  pi.registerShortcut("ctrl+shift+b", {
+    description: "View and manage background jobs",
+    handler: async (ctx) => {
+      if (jobs.size === 0) {
+        ctx.ui.notify("No background jobs running", "info");
+        return;
+      }
+
+      const items = Array.from(jobs.values()).map(
+        (j) => `⚙ [${j.pid}] ${j.command}${j.sessionId ? ` [session: ${j.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
+      );
+
+      const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
+      if (choice && choice !== "Cancel") {
+        const match = choice.match(/\[(\d+)\]/);
+        if (match) {
+          const pid = parseInt(match[1], 10);
+          if (killJob(pid)) {
+            ctx.ui.notify(`Stopped background job ${pid}`, "info");
+            syncStatus(ctx);
+          }
+        }
+      }
+    },
   });
 
   pi.registerCommand("bg", {
@@ -358,6 +411,7 @@ export default function (pi: ExtensionAPI) {
     name: "bg",
     label: "Background",
     description: "Run long-running shell commands in the background without blocking the agent session.",
+    promptSnippet: "Run long-running shell commands in the background without blocking the agent session.",
     promptGuidelines: [
       "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
       "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
@@ -384,6 +438,7 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Delegate complex, isolated, or deep exploration tasks to a background subagent.",
+    promptSnippet: "Delegate complex, isolated, or deep exploration tasks to a background subagent.",
     promptGuidelines: [
       "Use subagent for multi-step sub-tasks, background research, code audits, refactoring, or sub-problems to keep main context uncluttered.",
       "Provide complete and self-contained instructions in prompt so the subagent has full context to complete the task.",

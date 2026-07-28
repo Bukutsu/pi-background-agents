@@ -119,6 +119,10 @@ The `/bg` command manages running background processes.
 - `/bg`: Displays an interactive selection menu in TUI mode to stop a running background job. Displays PID, command summary, session ID (if applicable), and elapsed runtime. If no jobs are active, displays a notification.
 - `/bg <pid>` or `/bg kill <pid>`: Stops the process with the given PID.
 
+## Keyboard Shortcut
+
+- **Ctrl+Shift+B**: Opens the background job manager. Same interactive selector as `/bg`.
+
 ### Process Termination
 
 - On Unix/Linux, process termination sends `SIGINT` to the process group. If the process does not exit within 2 seconds, `SIGKILL` is sent.
@@ -133,9 +137,17 @@ The `/bg` command manages running background processes.
 - `● <N> bg done`: Indicates `<N>` queued subagent results are completed and waiting for the user's next turn.
 - `● <N> bg · <M> bg done`: Indicates active background jobs and queued results simultaneously.
 
+When background jobs are running, the terminal title shows `pi [<N> bg]`.
+
 Status clears automatically when all background jobs complete and queued results are consumed at the start of the next turn.
 
 ## Data Storage & Cleanup
 
 - Logs and temporary session files are stored in `/tmp/pi-bg` (`/tmp/pi-bg/sessions` for subagent sessions).
-- Log files older than 24 hours are automatically deleted when a new `pi` session starts (`session_start`).
+- Log files older than 24 hours are automatically deleted when a new `pi` session starts (`session_start`). This includes stale subagent session directories.
+
+## Extension Events
+
+`pi-bg` emits events on the shared `pi.events` bus so other extensions can react to background task lifecycle:
+
+- **`bg:task_end`**: Emitted when any background task (shell or subagent) finishes. Payload: `{ pid, command, exitCode, signal, timedOut, isSubagent, sessionId }`.

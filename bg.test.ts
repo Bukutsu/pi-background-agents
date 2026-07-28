@@ -10,17 +10,19 @@ const messages: unknown[] = [];
 extension({
   registerTool(tool: any) { tools.set(tool.name, tool); },
   registerCommand() {},
+  registerShortcut() {},
   registerEntryRenderer() {},
   registerMessageRenderer() {},
   on(name: string, handler: Function) { events.set(name, handler); },
   appendEntry(_type: string, data: { content: string }) { entries.push(data); },
   sendMessage(message: unknown) { messages.push(message); },
+  events: { emit() {}, on() {} },
 } as any);
 
 const ctx = {
   cwd: process.cwd(),
   isIdle: () => true,
-  ui: { setStatus() {}, theme: { fg: (_color: string, text: string) => text } },
+  ui: { setStatus() {}, setTitle() {}, theme: { fg: (_color: string, text: string) => text } },
 } as any;
 
 async function waitForEntries(count: number) {
