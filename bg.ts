@@ -62,6 +62,18 @@ export default function (pi: ExtensionAPI) {
     renderMessage(message.content, theme, outputPad)
   );
 
+  pi.on("tool_call", async (event) => {
+    if (event.toolName === "bash" && typeof (event.input as any)?.command === "string") {
+      const cmd = ((event.input as any).command as string).trim();
+      if (/^\s*(sleep\s+\d+|while\s+.*sleep|until\s+.*sleep|watch\s+)/i.test(cmd)) {
+        return {
+          block: true,
+          reason: "Do not use sleep or polling loops to wait for turns or background jobs. Background task results arrive automatically when ready.",
+        };
+      }
+    }
+  });
+
   function syncStatus(ctx: ExtensionContext) {
     try {
       const status = formatStatus(jobs.size, pendingResults);
@@ -378,7 +390,7 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Run a task in a separate background Pi process. Pass sessionId from an earlier result to continue that subagent.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Set completion to continue only when you must consume the result and keep working without user input; otherwise queue it. Restrict tools to those needed. Continue working after delegation; never wait, sleep, or poll for results."],
+    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Set completion to continue only when you must consume the result and keep working without user input; otherwise queue it. Restrict tools to those needed. NEVER use sleep or polling commands after calling subagent; results arrive automatically."],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
       sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
