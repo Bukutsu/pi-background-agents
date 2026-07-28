@@ -464,17 +464,23 @@ export default function (pi: ExtensionAPI) {
       return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
     },
     async execute(id, { prompt, sessionId, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
-      const available = ctx.modelRegistry.getAvailable();
-      const requested = model?.trim().toLowerCase();
-      const exact = requested && available.find((m) =>
-        m.id.toLowerCase() === requested || `${m.provider}/${m.id}`.toLowerCase() === requested
-      );
-      const fuzzy = requested ? available.filter((m) =>
-        m.id.toLowerCase().includes(requested) || m.name?.toLowerCase().includes(requested)
-      ) : [];
-      const requestedModel = exact || (fuzzy.length === 1 ? fuzzy[0] : undefined);
-      const selected = requestedModel ??
-        (ctx.model && available.find((m) => m.provider === ctx.model.provider && m.id === ctx.model.id));
+      let targetModel: string | undefined;
+      if (model?.trim()) {
+        const requested = model.trim();
+        const available = ctx.modelRegistry.getAvailable();
+        const exact = available.find((m) =>
+          m.id.toLowerCase() === requested.toLowerCase() ||
+          `${m.provider}/${m.id}`.toLowerCase() === requested.toLowerCase()
+        );
+        const fuzzy = available.filter((m) =>
+          m.id.toLowerCase().includes(requested.toLowerCase()) ||
+          m.name?.toLowerCase().includes(requested.toLowerCase())
+        );
+        const matched = exact || (fuzzy.length === 1 ? fuzzy[0] : undefined);
+        targetModel = matched ? `${matched.provider}/${matched.id}` : requested;
+      } else if (ctx.model) {
+        targetModel = `${ctx.model.provider}/${ctx.model.id}`;
+      }
 
       const session = getSubagentSession(sessionId);
       if (Array.from(jobs.values()).some((job) => job.sessionId === session.id)) {
@@ -482,7 +488,7 @@ export default function (pi: ExtensionAPI) {
       }
       const args = ["--mode", "json", "-p", ...session.args, ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
       const cleanupFiles: string[] = [];
-      if (selected) args.push("--model", `${selected.provider}/${selected.id}`);
+      if (targetModel) args.push("--model", targetModel);
       if (thinking) args.push("--thinking", thinking);
       if (systemPrompt) {
         mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -499,9 +505,9 @@ export default function (pi: ExtensionAPI) {
       const [file, invocationArgs] = getPiInvocation(args);
       try {
         const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id, completion, true);
-        const selectedModel = selected ? `${selected.provider}/${selected.id}` : "Pi automatic selection";
-        job.content[0].text += `\nSession: ${session.id}\nModel: ${selectedModel}`;
-        return { ...job, details: { ...job.details, sessionId: session.id, model: selectedModel } };
+        const displayModel = targetModel ?? "Pi default";
+        job.content[0].text += `\nSession: ${session.id}\nModel: ${displayModel}`;
+        return { ...job, details: { ...job.details, sessionId: session.id, model: displayModel } };
       } catch (error) {
         for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
         throw error;
