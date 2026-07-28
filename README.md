@@ -137,8 +137,6 @@ The `/bg` command manages running background processes.
 - `● <N> bg done`: Indicates `<N>` queued subagent results are completed and waiting for the user's next turn.
 - `● <N> bg · <M> bg done`: Indicates active background jobs and queued results simultaneously.
 
-When background jobs are running, the terminal title shows `pi [<N> bg]`.
-
 Status clears automatically when all background jobs complete and queued results are consumed at the start of the next turn.
 
 ## Data Storage & Cleanup

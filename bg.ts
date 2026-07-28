@@ -68,7 +68,6 @@ export default function (pi: ExtensionAPI) {
     try {
       const status = formatStatus(jobs.size, pendingResults);
       ctx.ui.setStatus("bg-jobs", status ? `${ctx.ui.theme.fg("accent", "● ")}${status}` : undefined);
-      try { ctx.ui.setTitle(jobs.size ? `pi [${jobs.size} bg]` : undefined); } catch {}
     } catch {}
   }
 
