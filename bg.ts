@@ -357,8 +357,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg",
     label: "Background",
-    description: "Run a shell command in the background.",
-    promptGuidelines: ["Use bg for long-running commands. After starting it, continue other work; never wait, sleep, or poll for completion."],
+    description: "Run long-running shell commands in the background without blocking the agent session.",
+    promptGuidelines: [
+      "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
+      "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
+      "After starting bg, continue work immediately; never wait, sleep, or poll for completion.",
+    ],
     parameters: Type.Object({
       command: Type.String({ description: "Shell command" }),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
@@ -379,8 +383,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Run a task in a separate background Pi process. Pass sessionId from an earlier result to continue that subagent.",
-    promptGuidelines: ["Use subagent for isolated or parallel work. Reuse sessionId for follow-up tasks. Subagent completion automatically wakes up the session turn when ready."],
+    description: "Delegate complex, isolated, or deep exploration tasks to a background subagent.",
+    promptGuidelines: [
+      "Use subagent for multi-step sub-tasks, background research, code audits, refactoring, or sub-problems to keep main context uncluttered.",
+      "Provide complete and self-contained instructions in prompt so the subagent has full context to complete the task.",
+      "Reuse sessionId from an earlier subagent result to continue conversation state with that subagent.",
+      "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
+    ],
     parameters: Type.Object({
       prompt: Type.String({ description: "Task" }),
       sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
