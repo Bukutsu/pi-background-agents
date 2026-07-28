@@ -34,7 +34,7 @@ export function formatStatus(running: number, pending: number) {
 
 export function getDeliveryOptions(isIdle: boolean, completion: "queue" | "continue") {
   return {
-    deliverAs: isIdle && completion === "queue" ? "nextTurn" as const : "steer" as const,
+    deliverAs: "steer" as const,
     triggerTurn: isIdle && completion === "continue",
   };
 }

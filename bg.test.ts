@@ -29,7 +29,7 @@ async function waitForEntries(count: number) {
 }
 
 test("completion delivery queues or continues when idle", () => {
-  expect(getDeliveryOptions(true, "queue")).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+  expect(getDeliveryOptions(true, "queue")).toEqual({ deliverAs: "steer", triggerTurn: false });
   expect(getDeliveryOptions(true, "continue")).toEqual({ deliverAs: "steer", triggerTurn: true });
   expect(getDeliveryOptions(false, "queue")).toEqual({ deliverAs: "steer", triggerTurn: false });
 });
