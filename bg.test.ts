@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import extension, { formatStatus, getDeliveryOptions, getSubagentSession } from "./bg.ts";
+import extension, { formatStatus, getDeliveryOptions } from "./bg.ts";
 
 const tools = new Map<string, any>();
 const events = new Map<string, Function>();
@@ -43,28 +43,6 @@ test("background status shows running and queued results", () => {
   expect(formatStatus(2, 1)).toBe("2 bg · 1 bg done");
 });
 
-test("subagent sessions are generated or reused", () => {
-  const fresh = getSubagentSession();
-  expect(fresh.id).toMatch(/^[0-9a-f-]{36}$/);
-  expect(fresh.args).toEqual(["--no-session", "--session-id", fresh.id]);
-  expect(fresh.args).toContain("--no-session");
-  expect(fresh.args).not.toContain("--session-dir");
-
-  const whitespace = getSubagentSession("   ");
-  expect(whitespace.args).toContain("--no-session");
-  expect(whitespace.args).not.toContain("--session-dir");
-
-  const existing = "123e4567-e89b-42d3-a456-426614174000";
-  const custom = getSubagentSession(` ${existing} `);
-  expect(custom).toEqual({
-    id: existing,
-    args: ["--session-id", existing, "--session-dir", expect.stringMatching(/pi-bg[/\\]sessions$/)],
-  });
-  expect(custom.args).toContain("--session-dir");
-  expect(custom.args).not.toContain("--no-session");
-  expect(custom.args[custom.args.indexOf("--session-dir") + 1]).toMatch(/pi-bg[/\\]sessions$/);
-});
-
 test("background job lifecycle", async () => {
   const bg = tools.get("bg");
 
@@ -75,9 +53,9 @@ test("background job lifecycle", async () => {
   expect(entries[0].content).toContain("done");
   expect(existsSync(short.details.logFile)).toBe(false);
 
-  const long = await bg.execute("long", { command: `node -e "process.stdout.write('A'.repeat(2501))"`, timeoutSec: 5 }, undefined, undefined, ctx);
+  const long = await bg.execute("long", { command: `node -e "process.stdout.write('A'.repeat(60000))"`, timeoutSec: 5 }, undefined, undefined, ctx);
   await waitForEntries(2);
-  expect(entries[1].content).toContain("[Middle omitted]");
+  expect(entries[1].content).toContain("The result was shortened");
   expect(entries[1].content).toContain("The result was shortened");
   expect(existsSync(long.details.logFile)).toBe(true);
 

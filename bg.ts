@@ -1,12 +1,13 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 const LOG_DIR = join(tmpdir(), "pi-bg");
 const SUBAGENT_SESSION_DIR = join(LOG_DIR, "sessions");
@@ -17,15 +18,7 @@ interface BgJob {
   startedAt: number;
   sessionId?: string;
   stopping?: boolean;
-}
-
-export function getSubagentSession(sessionId?: string) {
-  const isCustom = Boolean(sessionId?.trim());
-  const id = sessionId?.trim() || randomUUID();
-  const args = isCustom
-    ? ["--session-id", id, "--session-dir", SUBAGENT_SESSION_DIR]
-    : ["--no-session", "--session-id", id];
-  return { id, args };
+  session?: AgentSession;
 }
 
 export function formatStatus(running: number, pending: number) {
@@ -42,6 +35,8 @@ export function getDeliveryOptions(isIdle: boolean, completion: "queue" | "conti
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
   let pendingResults = 0;
+  let nextVirtualPid = -1;
+  let modelRuntime: Promise<ModelRuntime> | undefined;
 
   const renderMessage = (content: string, theme: Theme, padding: number) => {
     const newline = content.indexOf("\n");
@@ -75,6 +70,10 @@ export default function (pi: ExtensionAPI) {
     const job = jobs.get(pid);
     if (!job) return false;
     try {
+      if (job.session) {
+        void job.session.abort();
+        return true;
+      }
       if (process.platform === "win32") {
         const result = spawnSync("taskkill", [graceful ? "/T" : "/F", "/PID", String(pid)], { stdio: "ignore" });
         return !result.error && result.status === 0;
@@ -91,27 +90,14 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function getPiInvocation(args: string[]): [string, string[]] {
-    const script = process.argv[1];
-    if (script && !script.startsWith("/$bunfs/root/") && existsSync(script)) {
-      return [process.execPath, [script, ...args]];
-    }
-    return /^(node|bun)(\.exe)?$/.test(basename(process.execPath).toLowerCase())
-      ? ["pi", args]
-      : [process.execPath, args];
-  }
-
   function runBgProcess(
     file: string,
     args: string[],
     displayCommand: string,
     timeoutSec: number,
     ctx: ExtensionContext,
-    cleanupFiles: string[] = [],
     includeInContext = false,
-    sessionId?: string,
     completion: "queue" | "continue" = "queue",
-    isSubagent = false,
   ) {
     const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -136,7 +122,7 @@ export default function (pi: ExtensionAPI) {
     }, timeoutSec * 1000);
 
     if (proc.pid) {
-      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now(), sessionId });
+      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now() });
       syncStatus(ctx);
     }
 
@@ -156,92 +142,16 @@ export default function (pi: ExtensionAPI) {
         : "Background task failed";
       let result = "";
       let keepLog = code !== 0 || Boolean(spawnError);
-      let parsedUsage: any = undefined;
-
       try {
         const content = readFileSync(logFile, "utf-8").trim();
-
-        if (isSubagent && content) {
-          const lines = content.split("\n");
-          const texts: string[] = [];
-          let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, costTotal = 0;
-          let foundJson = false;
-
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const event = JSON.parse(line);
-              if (event && typeof event === "object") {
-                foundJson = true;
-                if (event.type === "message_end" && event.message?.role === "assistant") {
-                  const msg = event.message;
-                  if (Array.isArray(msg.content)) {
-                    for (const part of msg.content) {
-                      if (part?.type === "text" && part.text) texts.push(part.text);
-                    }
-                  }
-                  if (msg.errorMessage) {
-                    texts.push(`Error: ${msg.errorMessage}`);
-                  }
-                  if (msg.usage) {
-                    input += msg.usage.input || 0;
-                    output += msg.usage.output || 0;
-                    cacheRead += msg.usage.cacheRead || 0;
-                    cacheWrite += msg.usage.cacheWrite || 0;
-                    costTotal += (typeof msg.usage.cost === "object" ? msg.usage.cost?.total : msg.usage.cost) || 0;
-                  }
-                }
-              }
-            } catch {}
-          }
-
-          if (foundJson) {
-            const outText = texts.join("\n").trim();
-            result = outText ? `\n\nResult:\n${outText}` : "";
-            const totalTokens = input + output + cacheRead + cacheWrite;
-            if (totalTokens > 0 || costTotal > 0) {
-              parsedUsage = {
-                input,
-                output,
-                cacheRead,
-                cacheWrite,
-                totalTokens,
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
-              };
-            }
-          }
-        }
-
-        if (!parsedUsage && content.length > 2000) {
-          const head = content.slice(0, 1000).replace(/\s+\S*$/, "");
-          const tail = content.slice(-1000).replace(/^\S*\s+/, "");
-          result = `\n\nResult:\n${head}\n\n[Middle omitted]\n\n${tail}\n\nThe result was shortened. Full result: ${logFile}`;
+        const truncated = truncateTail(content);
+        if (truncated.truncated) {
+          result = `\n\nResult:\n${truncated.content}\n\nThe result was shortened. Full result: ${logFile}`;
           keepLog = true;
-        } else if (!parsedUsage && content) {
+        } else if (content) {
           result = `\n\nResult:\n${content}`;
         }
       } catch {}
-
-      if (parsedUsage) {
-        const u = parsedUsage;
-        const tokens = `↑${u.input} ↓${u.output}${u.cacheRead ? ` R${u.cacheRead}` : ""}${u.cacheWrite ? ` W${u.cacheWrite}` : ""}`;
-        const costStr = u.cost.total > 0 ? ` ($${u.cost.total.toFixed(4)})` : "";
-        result += `\n\nSubagent Usage: ${tokens}${costStr}`;
-
-        try {
-          (ctx.sessionManager as any).appendMessage({
-            role: "toolResult",
-            toolCallId: randomUUID(),
-            toolName: "subagent",
-            content: [{ type: "text", text: `[Subagent usage recorded]` }],
-            usage: parsedUsage,
-            isError: code !== 0,
-            timestamp: Date.now(),
-          });
-        } catch (e) {
-          console.error("Failed to append subagent toolResult usage", e);
-        }
-      }
 
       try {
         pi.events.emit("bg:task_end", {
@@ -250,8 +160,8 @@ export default function (pi: ExtensionAPI) {
           exitCode: code,
           signal,
           timedOut,
-          isSubagent,
-          sessionId,
+          isSubagent: false,
+          sessionId: undefined,
         });
       } catch {}
 
@@ -277,7 +187,6 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         console.error(`pi-bg could not deliver a result. Full result: ${logFile}`, error);
       }
-      for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
     });
 
     return {
@@ -463,54 +372,69 @@ export default function (pi: ExtensionAPI) {
       return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
     },
     async execute(id, { prompt, sessionId, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
-      let targetModel: string | undefined;
-      if (model?.trim()) {
-        const requested = model.trim();
-        const available = ctx.modelRegistry.getAvailable();
-        const exact = available.find((m) =>
-          m.id.toLowerCase() === requested.toLowerCase() ||
-          `${m.provider}/${m.id}`.toLowerCase() === requested.toLowerCase()
-        );
-        const fuzzy = available.filter((m) =>
-          m.id.toLowerCase().includes(requested.toLowerCase()) ||
-          m.name?.toLowerCase().includes(requested.toLowerCase())
-        );
-        const matched = exact || (fuzzy.length === 1 ? fuzzy[0] : undefined);
-        targetModel = matched ? `${matched.provider}/${matched.id}` : requested;
-      } else if (ctx.model) {
-        targetModel = `${ctx.model.provider}/${ctx.model.id}`;
+      const requestedId = sessionId?.trim();
+      if (requestedId && Array.from(jobs.values()).some((job) => job.sessionId === requestedId)) {
+        throw new Error(`Subagent session ${requestedId} is already running`);
       }
 
-      const session = getSubagentSession(sessionId);
-      if (Array.from(jobs.values()).some((job) => job.sessionId === session.id)) {
-        throw new Error(`Subagent session ${session.id} is already running`);
-      }
-      const args = ["--mode", "json", "-p", ...session.args, ctx.isProjectTrusted() ? "--approve" : "--no-approve"];
-      const cleanupFiles: string[] = [];
-      if (targetModel) args.push("--model", targetModel);
-      if (thinking) args.push("--thinking", thinking);
-      if (systemPrompt) {
-        mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-        const promptFile = join(LOG_DIR, `prompt-${randomUUID()}.md`);
-        writeFileSync(promptFile, systemPrompt, { mode: 0o600, flag: "wx" });
-        cleanupFiles.push(promptFile);
-        args.push("--append-system-prompt", promptFile);
-      }
-      if (tools) args.push("--tools", tools);
-      args.push(prompt);
+      modelRuntime ??= ModelRuntime.create();
+      const runtime = await modelRuntime;
+      const modelSpec = model?.trim() || (ctx.model && `${ctx.model.provider}/${ctx.model.id}`);
+      const [provider, ...modelParts] = modelSpec?.split("/") ?? [];
+      const targetModel = modelParts.length ? runtime.getModel(provider, modelParts.join("/")) : undefined;
+      if (modelSpec && !targetModel) throw new Error(`Model not found: ${modelSpec}. Use provider/model.`);
 
+      mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
+      const saved = requestedId && (await SessionManager.list(ctx.cwd, SUBAGENT_SESSION_DIR)).find((item) => item.id === requestedId);
+      if (requestedId && !saved) throw new Error(`Subagent session not found: ${requestedId}`);
+      const sessionManager = saved
+        ? SessionManager.open(saved.path, SUBAGENT_SESSION_DIR, ctx.cwd)
+        : SessionManager.create(ctx.cwd, SUBAGENT_SESSION_DIR);
+      const loader = systemPrompt
+        ? new DefaultResourceLoader({ cwd: ctx.cwd, agentDir: getAgentDir(), systemPromptOverride: () => `${ctx.getSystemPrompt()}\n\n${systemPrompt}` })
+        : undefined;
+      await loader?.reload();
+
+      const { session } = await createAgentSession({
+        cwd: ctx.cwd,
+        model: targetModel,
+        thinkingLevel: thinking,
+        tools: tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
+        modelRuntime: runtime,
+        resourceLoader: loader,
+        sessionManager,
+      });
+      const pid = nextVirtualPid--;
       const label = prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt;
-      const displayCmd = `Subagent: ${label}`;
-      const [file, invocationArgs] = getPiInvocation(args);
-      try {
-        const job = runBgProcess(file, invocationArgs, displayCmd, timeoutSec, ctx, cleanupFiles, true, session.id, completion, true);
-        const displayModel = targetModel ?? "Pi default";
-        job.content[0].text += `\nSession: ${session.id}\nModel: ${displayModel}`;
-        return { ...job, details: { ...job.details, sessionId: session.id, model: displayModel } };
-      } catch (error) {
-        for (const file of cleanupFiles) try { unlinkSync(file); } catch {}
-        throw error;
-      }
+      jobs.set(pid, { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, session });
+      syncStatus(ctx);
+
+      const timer = setTimeout(() => void session.abort(), timeoutSec * 1000);
+      void session.prompt(prompt).then(() => {
+        const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
+        const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
+        const text = rawText && truncateTail(rawText).content;
+        const error = message?.errorMessage;
+        const usage = message?.usage;
+        const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
+        const msg = `${error ? "Background subagent failed" : "Background subagent finished"}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${usageText}`;
+        const isIdle = ctx.isIdle();
+        pi.sendMessage({ customType: "pi-bg-result", content: msg, display: true }, getDeliveryOptions(isIdle, completion));
+        if (isIdle && completion === "queue") pendingResults++;
+      }).catch((error) => {
+        pi.sendMessage({ customType: "pi-bg-result", content: `Background subagent failed\nTask: Subagent: ${label}\n\nReason: ${error}`, display: true }, getDeliveryOptions(ctx.isIdle(), completion));
+      }).finally(() => {
+        clearTimeout(timer);
+        jobs.delete(pid);
+        session.dispose();
+        syncStatus(ctx);
+      });
+
+      const displayModel = modelSpec ?? "Pi default";
+      return {
+        content: [{ type: "text", text: `Started: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.\nSession: ${session.sessionId}\nModel: ${displayModel}` }],
+        details: { pid, sessionId: session.sessionId, model: displayModel },
+      };
     },
   });
 }

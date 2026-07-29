@@ -38,7 +38,7 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 - Output (stdout and stderr) is written to `/tmp/pi-bg/<uuid>.log`.
 - Returns immediately after spawning the process.
 - When execution finishes, the result entry (`pi-bg-result`) is appended to session history.
-- Results longer than 2,000 characters are truncated to the first 1,000 and last 1,000 characters with a reference to the log file path.
+- Results are truncated to Pi's standard 50 KB or 2,000-line limit, keeping the tail and linking to the full log.
 - Log files are automatically deleted upon successful completion (exit code `0`), unless output was truncated. For failed, timed-out, or truncated runs, log files are retained.
 
 #### Example
@@ -62,7 +62,7 @@ Spawns an isolated `pi` background process to execute a subagent task.
 | --- | --- | --- | --- | --- |
 | `prompt` | `string` | Yes | — | Task instructions for the subagent. |
 | `sessionId` | `string` | No | Generated UUID | Session ID for stateful subagent conversations. |
-| `completion` | `string` | No | `"queue"` | Delivery mode: `"queue"` or `"continue"`. |
+| `completion` | `string` | No | `"continue"` | Delivery mode: `"queue"` or `"continue"`. |
 | `model` | `string` | No | Parent model | Target model specifier (e.g. `anthropic/claude-3-5-sonnet` or model ID). |
 | `thinking` | `string` | No | — | Thinking effort level (`"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). |
 | `systemPrompt` | `string` | No | — | Additional system instructions appended to the subagent prompt. |
@@ -72,14 +72,15 @@ Spawns an isolated `pi` background process to execute a subagent task.
 #### Behavior
 
 - **Session persistence**:
-  - When `sessionId` is provided, session state is stored in `/tmp/pi-bg/sessions`, allowing follow-up calls to reuse state.
-  - When `sessionId` is omitted, the subagent runs with `--no-session`.
-  - Reusing a `sessionId` while a subagent task for that session is currently running results in an error.
+  - Subagents use Pi SDK sessions stored in `/tmp/pi-bg/sessions`.
+  - When `sessionId` is omitted, a new session is created and its ID is returned.
+  - A supplied `sessionId` must identify an existing subagent session.
+  - Reusing a `sessionId` while that session is running results in an error.
 - **Completion modes**:
   - `"queue"` (default): Delivers subagent results to context. If the parent agent is idle when completed, the result is queued (`nextTurn`) and status displays `bg done` without triggering an agent turn until the user sends a message.
   - `"continue"`: Delivers result and immediately triggers a new agent turn (`triggerTurn: true`) if the parent agent is idle.
-- **Project trust**: Inherits `--approve` or `--no-approve` based on the parent workspace trust setting.
-- **System prompt**: `systemPrompt` text is saved to a temporary file (`/tmp/pi-bg/prompt-<uuid>.md`) and passed via `--append-system-prompt`. The temporary file is cleaned up after process termination.
+- **Project context**: The SDK session runs in the parent working directory with Pi's normal resource discovery.
+- **System prompt**: `systemPrompt` is appended through Pi's `DefaultResourceLoader`; no temporary prompt file is created.
 
 #### Examples
 
