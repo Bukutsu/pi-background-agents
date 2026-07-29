@@ -28,10 +28,9 @@ function getSubagentHeading(error?: string, timedOut = false, cancelled = false)
   return timedOut ? "Background subagent timed out" : cancelled ? "Background subagent was stopped" : error ? "Background subagent failed" : "Background subagent finished";
 }
 
-const jobs: Map<number, BgJob> = (globalThis as any).__pi_bg_jobs ??= new Map<number, BgJob>();
-let nextVirtualPid: number = (globalThis as any).__pi_bg_next_pid ??= -1;
-
 export default function (pi: ExtensionAPI) {
+  const jobs = new Map<number, BgJob>();
+  let nextVirtualPid = -1;
   let modelRuntime: Promise<ModelRuntime> | undefined;
   let activeSubagents = 0;
   let activeWriters = 0;
@@ -199,7 +198,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     if (widgetTimer) clearInterval(widgetTimer);
-    // Retain running subagent sessions across /reload; only clear UI handlers
+    for (const pid of [...jobs.keys()]) killJob(pid);
   });
 
   async function manageJobs(ctx: ExtensionContext) {
@@ -414,7 +413,9 @@ export default function (pi: ExtensionAPI) {
           const usage = message?.usage;
           const state = timedOut ? "timed-out" : cancelled ? "stopped" : error ? "failed" : "finished";
           const usageText = usage ? `\n\nSubagent Usage: in:${usage.input} out:${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
-          const recovery = state === "failed" ? `\n\nSession ${session.sessionId} can be resumed after correcting the error.` : "";
+          const recovery = (state === "failed" || state === "stopped" || state === "timed-out")
+            ? `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`
+            : "";
           deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${recovery}${usageText}`, ctx, completion);
         }, (error) => {
           const reason = error instanceof Error ? error.message : String(error);
