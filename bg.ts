@@ -1,5 +1,6 @@
 import { createAgentSession, createLocalBashOperations, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
@@ -64,10 +65,45 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   }
 
+  const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let widgetTimer: ReturnType<typeof setInterval> | undefined;
+
   function syncStatus(ctx?: ExtensionContext) {
     const active = getActiveCtx(ctx);
     if (!active) return;
-    active.ui.setStatus("bg-jobs", jobs.size ? `${active.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
+
+    const activeJobs = Array.from(jobs.values());
+    if (activeJobs.length === 0) {
+      active.ui.setWidget("bg-subagents", undefined);
+      if (widgetTimer) {
+        clearInterval(widgetTimer);
+        widgetTimer = undefined;
+      }
+      return;
+    }
+
+    active.ui.setWidget("bg-subagents", (_tui, theme) => {
+      const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
+      const suffix = theme.fg("dim", " · /bg");
+      return {
+        render(width: number) {
+          const count = activeJobs.length;
+          const icon = theme.fg("accent", frame);
+          const summaries = activeJobs.slice(0, 3).map((job) => {
+            const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+            return `${job.command} (${job.state}, ${elapsed}s)`;
+          }).join(", ");
+          const extra = count > 3 ? theme.fg("dim", `, +${count - 3} more`) : "";
+          const text = `${icon} ${theme.fg("text", `${count} running:`)} ${summaries}${extra}${suffix}`;
+          return [truncateToWidth(text, width)];
+        },
+        invalidate() {},
+      };
+    }, { placement: "aboveEditor" });
+
+    if (!widgetTimer) {
+      widgetTimer = setInterval(() => syncStatus(ctx), 100);
+    }
   }
 
   function deliverCompletion(message: string, ctx: ExtensionContext | undefined, completion: "queue" | "continue") {
@@ -161,6 +197,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    if (widgetTimer) clearInterval(widgetTimer);
     for (const pid of [...jobs.keys()]) killJob(pid);
   });
 
@@ -171,7 +208,7 @@ export default function (pi: ExtensionAPI) {
     const choice = await active.ui.select("Select job to stop:", [
       "Cancel",
       ...Array.from(jobs.values(), (job) =>
-        `⚙ [${job.pid}] ${job.state === "queued" ? "queued " : ""}${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
+        `[${job.pid}] ${job.state === "queued" ? "queued " : ""}${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
       ),
     ]);
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
@@ -375,7 +412,7 @@ export default function (pi: ExtensionAPI) {
           const error = message?.errorMessage as string | undefined;
           const usage = message?.usage;
           const state = timedOut ? "timed-out" : cancelled ? "stopped" : error ? "failed" : "finished";
-          const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
+          const usageText = usage ? `\n\nSubagent Usage: in:${usage.input} out:${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
           const recovery = state === "failed" ? `\n\nSession ${session.sessionId} can be resumed after correcting the error.` : "";
           deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${recovery}${usageText}`, ctx, completion);
         }, (error) => {
