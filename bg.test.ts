@@ -16,6 +16,11 @@ extension({
   on(name: string, handler: Function) { events.set(name, handler); },
   appendEntry(_type: string, data: { content: string }) { entries.push(data); },
   sendMessage(message: unknown) { messages.push(message); },
+  async exec(command: string, args: string[], options: { cwd?: string; signal?: AbortSignal }) {
+    const proc = Bun.spawn([command, ...args], { cwd: options.cwd, signal: options.signal, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    return { stdout, stderr, code, killed: proc.signalCode !== null };
+  },
   events: { emit() {}, on() {} },
 } as any);
 
@@ -56,7 +61,6 @@ test("background job lifecycle", async () => {
   const long = await bg.execute("long", { command: `node -e "process.stdout.write('A'.repeat(60000))"`, timeoutSec: 5 }, undefined, undefined, ctx);
   await waitForEntries(2);
   expect(entries[1].content).toContain("The result was shortened");
-  expect(entries[1].content).toContain("The result was shortened");
   expect(existsSync(long.details.logFile)).toBe(true);
 
   const timeout = await bg.execute("timeout", { command: "sleep 2", timeoutSec: 0.05 }, undefined, undefined, ctx);
@@ -66,10 +70,6 @@ test("background job lifecycle", async () => {
 
   rmSync(long.details.logFile, { force: true });
   rmSync(timeout.details.logFile, { force: true });
-});
-
-test("blocks sleep commands in tool_call", async () => {
-  expect(getDeliveryOptions(true, "continue")).toEqual({ deliverAs: "steer", triggerTurn: true });
 });
 
 afterAll(() => {

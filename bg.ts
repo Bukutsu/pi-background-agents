@@ -1,11 +1,10 @@
 import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
-import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,8 +16,7 @@ interface BgJob {
   command: string;
   startedAt: number;
   sessionId?: string;
-  stopping?: boolean;
-  session?: AgentSession;
+  controller: AbortController;
 }
 
 export function formatStatus(running: number, pending: number) {
@@ -66,135 +64,54 @@ export default function (pi: ExtensionAPI) {
     } catch {}
   }
 
-  function killJob(pid: number, graceful = true): boolean {
+  function killJob(pid: number): boolean {
     const job = jobs.get(pid);
     if (!job) return false;
-    try {
-      if (job.session) {
-        void job.session.abort();
-        return true;
-      }
-      if (process.platform === "win32") {
-        const result = spawnSync("taskkill", [graceful ? "/T" : "/F", "/PID", String(pid)], { stdio: "ignore" });
-        return !result.error && result.status === 0;
-      }
-      const signal = graceful ? "SIGINT" : "SIGKILL";
-      try { process.kill(-pid, signal); } catch { process.kill(pid, signal); }
-      if (graceful && !job.stopping) {
-        job.stopping = true;
-        setTimeout(() => { if (jobs.has(pid)) killJob(pid, false); }, 2000).unref();
-      }
-      return true;
-    } catch {
-      return false;
-    }
+    job.controller.abort();
+    return true;
   }
 
-  function runBgProcess(
-    file: string,
-    args: string[],
-    displayCommand: string,
-    timeoutSec: number,
-    ctx: ExtensionContext,
-    includeInContext = false,
-    completion: "queue" | "continue" = "queue",
-  ) {
-    const shownCommand = displayCommand.length > 120 ? `${displayCommand.slice(0, 117)}...` : displayCommand;
-    mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+  function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext) {
+    const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
+    const pid = nextVirtualPid--;
+    const controller = new AbortController();
     const logFile = join(LOG_DIR, `${randomUUID()}.log`);
-    const out = openSync(logFile, "wx", 0o600);
-    let proc;
-    try {
-      proc = spawn(file, args, { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
-    } finally {
-      closeSync(out);
-    }
-    proc.unref();
-
     let timedOut = false;
-    let spawnError: string | undefined;
-    proc.once("error", (error) => { spawnError = error.message; });
-    const timer = setTimeout(() => {
-      if (proc.pid && jobs.has(proc.pid)) {
-        timedOut = true;
-        killJob(proc.pid);
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
+    jobs.set(pid, { pid, command: shownCommand, startedAt: Date.now(), controller });
+    syncStatus(ctx);
+
+    void pi.exec("bash", ["-c", command], { cwd: ctx.cwd, signal: controller.signal }).then(({ stdout, stderr, code, killed }) => {
+      const content = `${stdout}${stderr}`.trim();
+      const truncated = truncateTail(content);
+      const keepLog = code !== 0 || truncated.truncated;
+      if (keepLog) {
+        mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+        writeFileSync(logFile, content, { mode: 0o600 });
       }
-    }, timeoutSec * 1000);
-
-    if (proc.pid) {
-      jobs.set(proc.pid, { pid: proc.pid, command: shownCommand, startedAt: Date.now() });
-      syncStatus(ctx);
-    }
-
-    proc.once("close", (code, signal) => {
-      clearTimeout(timer);
-      if (proc.pid) jobs.delete(proc.pid);
-      syncStatus(ctx);
-
       const heading = timedOut
         ? `Background task timed out after ${timeoutSec} seconds`
-        : spawnError
-        ? "Background task could not start"
         : code === 0
         ? "Background task finished"
-        : signal
+        : killed
         ? "Background task was stopped"
         : "Background task failed";
-      let result = "";
-      let keepLog = code !== 0 || Boolean(spawnError);
-      try {
-        const content = readFileSync(logFile, "utf-8").trim();
-        const truncated = truncateTail(content);
-        if (truncated.truncated) {
-          result = `\n\nResult:\n${truncated.content}\n\nThe result was shortened. Full result: ${logFile}`;
-          keepLog = true;
-        } else if (content) {
-          result = `\n\nResult:\n${content}`;
-        }
-      } catch {}
-
-      try {
-        pi.events.emit("bg:task_end", {
-          pid: proc.pid,
-          command: shownCommand,
-          exitCode: code,
-          signal,
-          timedOut,
-          isSubagent: false,
-          sessionId: undefined,
-        });
-      } catch {}
-
-      const reason = spawnError ? `\n\nReason: ${spawnError}` : code && code !== 0 ? `\n\nExit code: ${code}` : "";
-      const troubleshooting = code === 0 ? "" : `\n\nTroubleshooting log: ${logFile}`;
-      const msg = `${heading}\nTask: ${shownCommand}${reason}${result}${troubleshooting}`;
-      try {
-        if (includeInContext) {
-          let isIdle = false;
-          try { isIdle = ctx.isIdle(); } catch {}
-          pi.sendMessage(
-            { customType: "pi-bg-result", content: msg, display: true },
-            getDeliveryOptions(isIdle, completion),
-          );
-          if (isIdle && completion === "queue") {
-            pendingResults++;
-            syncStatus(ctx);
-          }
-        } else {
-          pi.appendEntry("pi-bg-result", { content: msg });
-        }
-        if (!keepLog) unlinkSync(logFile);
-      } catch (error) {
-        console.error(`pi-bg could not deliver a result. Full result: ${logFile}`, error);
-      }
+      const result = content ? `\n\nResult:\n${truncated.content}${truncated.truncated ? `\n\nThe result was shortened. Full result: ${logFile}` : ""}` : "";
+      const reason = code ? `\n\nExit code: ${code}` : "";
+      pi.appendEntry("pi-bg-result", { content: `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}` });
+    }).catch((error) => {
+      mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+      writeFileSync(logFile, String(error), { mode: 0o600 });
+      pi.appendEntry("pi-bg-result", { content: `Background task could not start\nTask: ${shownCommand}\n\nReason: ${error}\n\nTroubleshooting log: ${logFile}` });
+    }).finally(() => {
+      clearTimeout(timer);
+      jobs.delete(pid);
+      syncStatus(ctx);
     });
 
     return {
-      content: [{
-        type: "text",
-        text: `Started: ${shownCommand}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.`,
-      }],
-      details: { pid: proc.pid, logFile },
+      content: [{ type: "text" as const, text: `Started: ${shownCommand}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.` }],
+      details: { pid, logFile },
     };
   }
 
@@ -225,41 +142,28 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_settled", (_e, ctx) => {
-    if (pendingResults) {
-      pendingResults = 0;
-      syncStatus(ctx);
-    }
+  pi.on("session_shutdown", () => {
+    for (const pid of jobs.keys()) killJob(pid);
   });
 
-  pi.on("session_shutdown", () => {
-    for (const pid of jobs.keys()) killJob(pid, false);
-  });
+  async function manageJobs(ctx: ExtensionContext) {
+    if (jobs.size === 0) return ctx.ui.notify("No background jobs running", "info");
+    const choice = await ctx.ui.select("Select job to stop:", [
+      "Cancel",
+      ...Array.from(jobs.values(), (job) =>
+        `⚙ [${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
+      ),
+    ]);
+    const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
+    if (choice !== "Cancel" && Number.isInteger(pid) && killJob(pid)) {
+      ctx.ui.notify(`Stopped background job ${pid}`, "info");
+      syncStatus(ctx);
+    }
+  }
 
   pi.registerShortcut("ctrl+shift+b", {
     description: "View and manage background jobs",
-    handler: async (ctx) => {
-      if (jobs.size === 0) {
-        ctx.ui.notify("No background jobs running", "info");
-        return;
-      }
-
-      const items = Array.from(jobs.values()).map(
-        (j) => `⚙ [${j.pid}] ${j.command}${j.sessionId ? ` [session: ${j.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
-      );
-
-      const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
-      if (choice && choice !== "Cancel") {
-        const match = choice.match(/\[(\d+)\]/);
-        if (match) {
-          const pid = parseInt(match[1], 10);
-          if (killJob(pid)) {
-            ctx.ui.notify(`Stopped background job ${pid}`, "info");
-            syncStatus(ctx);
-          }
-        }
-      }
-    },
+    handler: manageJobs,
   });
 
   pi.registerCommand("bg", {
@@ -274,7 +178,7 @@ export default function (pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       const trimmed = args?.trim() ?? "";
-      const killMatch = trimmed.match(/^(?:kill\s+)?(\d+)$/);
+      const killMatch = trimmed.match(/^(?:kill\s+)?(-?\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);
         if (killJob(pid)) {
@@ -290,28 +194,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (jobs.size === 0) {
-        ctx.ui.notify("No background jobs running", "info");
-        return;
-      }
-
-      const items = Array.from(jobs.values()).map(
-        (j) => `⚙ [${j.pid}] ${j.command}${j.sessionId ? ` [session: ${j.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - j.startedAt) / 1000)}s)`
-      );
-
-      if (!ctx.hasUI) return;
-
-      const choice = await ctx.ui.select("Select job to stop:", ["Cancel", ...items]);
-      if (choice && choice !== "Cancel") {
-        const match = choice.match(/\[(\d+)\]/);
-        if (match) {
-          const pid = parseInt(match[1], 10);
-          if (killJob(pid)) {
-            ctx.ui.notify(`Stopped background job ${pid}`, "info");
-            syncStatus(ctx);
-          }
-        }
-      }
+      if (ctx.hasUI) await manageJobs(ctx);
     },
   });
 
@@ -329,16 +212,8 @@ export default function (pi: ExtensionAPI) {
       command: Type.String({ description: "Shell command" }),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    renderCall({ command }, theme) {
-      const shown = command.length > 100 ? `${command.slice(0, 97)}...` : command;
-      return new Text(`${theme.fg("toolTitle", theme.bold("background "))}${theme.fg("toolOutput", shown)}`, 0, 0);
-    },
-    renderResult(result, _options, theme) {
-      const pid = result.details?.pid ? theme.fg("dim", ` [${result.details.pid}]`) : "";
-      return new Text(`${theme.fg("success", "Started")}${pid}`, 0, 0);
-    },
     async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      return runBgProcess("bash", ["-c", command], command, timeoutSec, ctx);
+      return runBgProcess(command, timeoutSec, ctx);
     },
   });
 
@@ -363,14 +238,6 @@ export default function (pi: ExtensionAPI) {
       tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    renderCall({ prompt }, theme) {
-      const shown = prompt.length > 100 ? `${prompt.slice(0, 97)}...` : prompt;
-      return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("toolOutput", shown)}`, 0, 0);
-    },
-    renderResult(result, _options, theme) {
-      const model = result.details?.model ? theme.fg("dim", ` (${result.details.model})`) : "";
-      return new Text(`${theme.fg("success", "Started")}${model}`, 0, 0);
-    },
     async execute(id, { prompt, sessionId, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const requestedId = sessionId?.trim();
       if (requestedId && Array.from(jobs.values()).some((job) => job.sessionId === requestedId)) {
@@ -406,11 +273,13 @@ export default function (pi: ExtensionAPI) {
         sessionManager,
       });
       const pid = nextVirtualPid--;
+      const controller = new AbortController();
+      controller.signal.addEventListener("abort", () => void session.abort(), { once: true });
       const label = prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt;
-      jobs.set(pid, { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, session });
+      jobs.set(pid, { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller });
       syncStatus(ctx);
 
-      const timer = setTimeout(() => void session.abort(), timeoutSec * 1000);
+      const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
       void session.prompt(prompt).then(() => {
         const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
         const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();

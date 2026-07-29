@@ -35,11 +35,10 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 
 #### Behavior & Output
 
-- Output (stdout and stderr) is written to `/tmp/pi-bg/<uuid>.log`.
-- Returns immediately after spawning the process.
+- Returns immediately while Pi's SDK executes the process.
 - When execution finishes, the result entry (`pi-bg-result`) is appended to session history.
 - Results are truncated to Pi's standard 50 KB or 2,000-line limit, keeping the tail and linking to the full log.
-- Log files are automatically deleted upon successful completion (exit code `0`), unless output was truncated. For failed, timed-out, or truncated runs, log files are retained.
+- Full output is retained in `/tmp/pi-bg/<uuid>.log` only for failed or truncated runs.
 
 #### Example
 
@@ -117,8 +116,8 @@ Autonomous continuation mode:
 
 The `/bg` command manages running background processes.
 
-- `/bg`: Displays an interactive selection menu in TUI mode to stop a running background job. Displays PID, command summary, session ID (if applicable), and elapsed runtime. If no jobs are active, displays a notification.
-- `/bg <pid>` or `/bg kill <pid>`: Stops the process with the given PID.
+- `/bg`: Displays an interactive selection menu in TUI mode to stop a running background job. Displays job ID, command summary, session ID (if applicable), and elapsed runtime. If no jobs are active, displays a notification.
+- `/bg <id>` or `/bg kill <id>`: Stops the job with the given ID.
 
 ## Keyboard Shortcut
 
@@ -126,9 +125,7 @@ The `/bg` command manages running background processes.
 
 ### Process Termination
 
-- On Unix/Linux, process termination sends `SIGINT` to the process group. If the process does not exit within 2 seconds, `SIGKILL` is sent.
-- On Windows, termination uses `taskkill /T` (graceful) falling back to `taskkill /F` (forceful).
-- When the parent `pi` session shuts down (`session_shutdown`), all active background jobs are terminated immediately (`SIGKILL`).
+Pi's SDK handles cross-platform process-tree termination. When the parent session shuts down, all active jobs are aborted.
 
 ## Status Line Indicators
 
@@ -144,9 +141,3 @@ Status clears automatically when all background jobs complete and queued results
 
 - Logs and temporary session files are stored in `/tmp/pi-bg` (`/tmp/pi-bg/sessions` for subagent sessions).
 - Log files older than 24 hours are automatically deleted when a new `pi` session starts (`session_start`). This includes stale subagent session directories.
-
-## Extension Events
-
-`pi-bg` emits events on the shared `pi.events` bus so other extensions can react to background task lifecycle:
-
-- **`bg:task_end`**: Emitted when any background task (shell or subagent) finishes. Payload: `{ pid, command, exitCode, signal, timedOut, isSubagent, sessionId }`.
