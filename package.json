@@ -1,7 +1,7 @@
 {
   "name": "pi-bg",
-  "version": "0.1.0",
-  "description": "Minimal background execution extension for Pi coding agent",
+  "version": "0.2.0",
+  "description": "Minimal, SDK-native background execution and subagents for Pi",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -13,6 +13,19 @@
   ],
   "license": "MIT",
   "author": "Bukutsu",
+  "files": [
+    "bg.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run check"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Bukutsu/pi-bg.git"
@@ -25,6 +38,10 @@
     "extensions": [
       "./bg.ts"
     ]
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

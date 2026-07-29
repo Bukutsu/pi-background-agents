@@ -15,7 +15,8 @@ pi install git:github.com/Bukutsu/pi-bg
 - **Background shell execution**: Run non-blocking terminal commands via the `bg` tool.
 - **Subagent delegation**: Delegate tasks to separate subagent instances via the `subagent` tool.
 - **Session persistence and control**: Resume, inspect, steer, or stop subagents using session IDs.
-- **Bounded parallelism**: Run four subagents concurrently and queue excess work automatically.
+- **Safe bounded parallelism**: Run four read-only subagents concurrently; subagents with `write` or `edit` access are serialized automatically.
+- **Restricted inheritance**: Children inherit the parent's active tools, never gain unavailable tools, and cannot recursively call `bg` or `subagent`.
 - **Configurable completion behavior**: Queue subagent results for the user's next prompt or wake the parent agent immediately upon completion.
 - **Native result cards**: Render themed status, usage, and Markdown output with expandable long results.
 - **Interactive task management**: View running jobs, inspect the latest 20 completed jobs, and terminate processes using `/bg`.
@@ -70,7 +71,8 @@ Runs an isolated Pi SDK session in the background. It can also inspect, steer, o
 | `model` | `string` | No | Parent model | Target model specifier (e.g. `anthropic/claude-3-5-sonnet` or model ID). |
 | `thinking` | `string` | No | — | Thinking effort level (`"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). |
 | `systemPrompt` | `string` | No | — | Additional system instructions appended to the subagent prompt. |
-| `tools` | `string` | No | — | Comma-separated list of allowed tool names. |
+| `tools` | `string` | No | Parent tools except `bg` and `subagent` | Comma-separated allowlist that can only narrow the parent's active tools. |
+| `cwd` | `string` | No | Parent working directory | Existing working directory inside the parent project. |
 | `timeoutSec` | `number` | No | `600` | Timeout in seconds (min: `1`, max: `2147483`). |
 
 #### Behavior
@@ -80,13 +82,15 @@ Runs an isolated Pi SDK session in the background. It can also inspect, steer, o
   - When `sessionId` is omitted, a new session is created and its ID is returned.
   - A supplied `sessionId` must identify an existing subagent session.
   - Reusing a `sessionId` while that session is running results in an error.
-- At most four subagents run simultaneously; additional calls wait in a FIFO queue and remain cancellable.
-- Pi can launch independent work in parallel by making multiple `subagent` calls in one turn.
+- At most four subagents run simultaneously. Subagents with `write` or `edit` access are serialized; read-only work remains parallel. Queued work remains cancellable.
+- Pi can launch independent read-only work in parallel by making multiple `subagent` calls in one turn.
+- Child tool access is inherited from the parent, excluding `bg` and `subagent`. An explicit `tools` value may narrow but never expand that access.
+- `cwd` must resolve to an existing directory within the parent project. `pi-bg` deliberately does not create or merge worktrees.
 - **Completion modes**:
   - `"queue"`: Delivers subagent results to context. If the parent agent is idle when completed, status displays `bg done` without triggering an agent turn until the user sends a message.
   - `"continue"`: Delivers result and immediately triggers a new agent turn (`triggerTurn: true`) if the parent agent is idle.
 - **Project context**: The SDK session runs in the parent working directory with Pi's normal resource discovery. Concurrent writing subagents can conflict, so parallel calls should normally be read-only unless work is isolated externally.
-- **Recent history**: Status actions include up to 20 completed jobs with state, duration, model/session metadata, and usage when available. History resets when Pi reloads.
+- **Recent history**: Status actions include up to 20 completed jobs with state, duration, model/session metadata, and usage when available. History is stored atomically in `/tmp/pi-bg/jobs.json` and survives Pi reloads.
 - **System prompt**: `systemPrompt` is appended through Pi's `DefaultResourceLoader`; no temporary prompt file is created.
 
 #### Examples
@@ -135,7 +139,7 @@ The `/bg` command manages running background processes.
 
 - `/bg`: Displays an interactive selection menu in TUI mode to stop a running background job. Displays job ID, command summary, session ID (if applicable), and elapsed runtime. If no jobs are active, displays a notification.
 - `/bg <id>` or `/bg kill <id>`: Stops the job with the given ID.
-- `/bg history`: Shows the latest 20 completed jobs from the current Pi session.
+- `/bg history`: Shows the latest 20 completed jobs, including records restored after a Pi reload.
 
 ## Keyboard Shortcut
 
@@ -157,5 +161,6 @@ Status clears automatically when all background jobs complete and queued results
 
 ## Data Storage & Cleanup
 
-- Logs and temporary session files are stored in `/tmp/pi-bg` (`/tmp/pi-bg/sessions` for subagent sessions).
+- Logs, recent job history, and temporary session files are stored in `/tmp/pi-bg` (`/tmp/pi-bg/sessions` for subagent sessions).
 - Log files older than 24 hours are automatically deleted when a new `pi` session starts (`session_start`). This includes stale subagent session directories.
+- Temporary storage is operational state, not a permanent archive; the operating system may clear it.

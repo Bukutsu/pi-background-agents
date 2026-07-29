@@ -5,12 +5,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 const LOG_DIR = join(tmpdir(), "pi-bg");
 const SUBAGENT_SESSION_DIR = join(LOG_DIR, "sessions");
+const HISTORY_FILE = join(LOG_DIR, "jobs.json");
 
 interface BgJob {
   pid: number;
@@ -23,6 +24,9 @@ interface BgJob {
   session?: AgentSession;
   logFile?: string;
   model?: string;
+  cwd?: string;
+  writer?: boolean;
+  start?: () => void;
 }
 
 interface FinishedJob {
@@ -37,6 +41,7 @@ interface FinishedJob {
   usage?: string;
   output?: string;
   logFile?: string;
+  cwd?: string;
 }
 
 function formatStatus(running: number, pending: number) {
@@ -60,8 +65,14 @@ export default function (pi: ExtensionAPI) {
   let nextVirtualPid = -1;
   let modelRuntime: Promise<ModelRuntime> | undefined;
   let activeSubagents = 0;
-  const subagentQueue: Array<() => void> = [];
-  const history: FinishedJob[] = [];
+  let activeWriters = 0;
+  const subagentQueue: BgJob[] = [];
+  let history: FinishedJob[] = [];
+  try {
+    history = JSON.parse(readFileSync(HISTORY_FILE, "utf8")).slice(0, 20);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn(`[pi-bg] Could not read job history: ${error}`);
+  }
 
   const renderMessage = (content: string, theme: Theme, padding: number, expanded: boolean) => {
     const lines = content.split("\n");
@@ -86,7 +97,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry, { expanded }, theme) =>
-    renderMessage(entry.data.content, theme, 1, expanded)
+    renderMessage(entry.data?.content ?? "Background task", theme, 1, expanded)
   );
   pi.registerMessageRenderer("pi-bg-result", (message, { expanded, outputPad }, theme) =>
     renderMessage(typeof message.content === "string" ? message.content : "", theme, outputPad, expanded)
@@ -116,8 +127,26 @@ export default function (pi: ExtensionAPI) {
   }
 
   function remember(job: BgJob, state: FinishedJob["state"], details: Partial<FinishedJob> = {}) {
-    history.unshift({ pid: job.pid, command: job.command, startedAt: job.startedAt, finishedAt: Date.now(), sessionId: job.sessionId, kind: job.kind, model: job.model, state, ...details });
+    history.unshift({ pid: job.pid, command: job.command, startedAt: job.startedAt, finishedAt: Date.now(), sessionId: job.sessionId, kind: job.kind, model: job.model, cwd: job.cwd, state, ...details });
     history.length = Math.min(history.length, 20);
+    try {
+      mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
+      const temporary = `${HISTORY_FILE}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify(history, null, 2), { mode: 0o600 });
+      renameSync(temporary, HISTORY_FILE);
+    } catch (error) {
+      console.warn(`[pi-bg] Could not persist job history: ${error}`);
+    }
+  }
+
+  function resolveSubagentCwd(parent: string, requested?: string) {
+    const target = resolve(parent, requested?.trim() || ".");
+    const rel = relative(realpathSync(parent), realpathSync(target));
+    if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) {
+      throw new Error(`cwd must be inside the parent working directory: ${parent}`);
+    }
+    if (!statSync(target).isDirectory()) throw new Error(`cwd is not a directory: ${target}`);
+    return target;
   }
 
   function describeFinished(job: FinishedJob) {
@@ -172,7 +201,7 @@ export default function (pi: ExtensionAPI) {
     proc.once("error", (error) => { spawnError = error.message; });
     proc.once("close", (code) => {
       clearTimeout(timer);
-      const job = pid && jobs.get(pid);
+      const job = pid === undefined ? undefined : jobs.get(pid);
       if (pid) jobs.delete(pid);
       const content = readFileSync(logFile, "utf8").trim();
       const truncated = truncateTail(content);
@@ -288,7 +317,7 @@ export default function (pi: ExtensionAPI) {
     name: "bg",
     label: "Background",
     description: "Run, inspect, or stop long-running shell commands without blocking the agent session.",
-    promptSnippet: "Run, inspect, or stop long-running shell commands without blocking the agent session."},{
+    promptSnippet: "Run, inspect, or stop long-running shell commands without blocking the agent session.",
     promptGuidelines: [
       "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
       "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
@@ -308,7 +337,7 @@ export default function (pi: ExtensionAPI) {
         const text = [...listed.map((job) => `${job.pid} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`), ...recent.map(describeFinished)];
         return { content: [{ type: "text" as const, text: text.join("\n") || "No shell jobs." }], details: { jobs: listed.map(({ controller, ...job }) => job), history: recent } };
       }
-      const job = pid && jobs.get(pid);
+      const job = pid === undefined ? undefined : jobs.get(pid);
       if (action === "stop") {
         if (!job || job.kind !== "shell") throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
         job.controller.abort();
@@ -336,7 +365,7 @@ export default function (pi: ExtensionAPI) {
       "Reuse sessionId from an earlier subagent result to continue conversation state with that subagent.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
       "For independent read-only tasks, call subagent multiple times in one turn; Pi runs sibling tool calls in parallel.",
-      "Run only one writing subagent at a time unless the work is externally isolated; subagents share the same working directory.",
+      "Writing subagents are serialized automatically; use read-only tool allowlists for parallel investigation.",
     ],
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["spawn", "status", "steer", "stop"] as const, { description: "Action (default: spawn)" })),
@@ -348,12 +377,13 @@ export default function (pi: ExtensionAPI) {
       model: Type.Optional(Type.String({ description: "Preferred model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
       systemPrompt: Type.Optional(Type.String({ description: "Extra system instructions" })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist; can only narrow the parent's tools" })),
+      cwd: Type.Optional(Type.String({ description: "Working directory inside the parent project" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    async execute(id, { action = "spawn", prompt, description, sessionId, message, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(_id, { action = "spawn", prompt, description, sessionId, message, completion = "continue", model, thinking, systemPrompt, tools, cwd, timeoutSec = 600 }, _sig, _up, ctx) {
       const requestedId = sessionId?.trim();
-      const matching = requestedId && Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId);
+      const matching = requestedId ? Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId) : undefined;
       if (action === "status") {
         const listed = Array.from(jobs.values()).filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
         const recent = history.filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
@@ -364,7 +394,11 @@ export default function (pi: ExtensionAPI) {
         if (!matching) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
         matching.controller.abort();
         if (matching.state === "queued") {
+          const index = subagentQueue.indexOf(matching);
+          if (index >= 0) subagentQueue.splice(index, 1);
           jobs.delete(matching.pid);
+          matching.session?.dispose();
+          remember(matching, "stopped");
           syncStatus(ctx);
         }
         return { content: [{ type: "text" as const, text: `Stopped subagent ${matching.sessionId}` }], details: { sessionId: matching.sessionId } };
@@ -396,22 +430,32 @@ export default function (pi: ExtensionAPI) {
       if (resolved?.warning) console.warn(resolved.warning);
       const targetModel = resolved?.model ?? ctx.model;
 
+      const rememberedCwd = requestedId ? history.find((item) => item.sessionId === requestedId)?.cwd : undefined;
+      const childCwd = resolveSubagentCwd(ctx.cwd, cwd ?? rememberedCwd);
+      const parentTools = pi.getActiveTools().filter((name) => name !== "bg" && name !== "subagent");
+      const requestedTools = tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
+      const unknownTools = requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
+      if (unknownTools.length) throw new Error(`Tools are not active in the parent session: ${unknownTools.join(", ")}`);
+      const childTools = requestedTools ?? parentTools;
+      const writer = childTools.includes("write") || childTools.includes("edit");
+
       mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
-      const saved = requestedId && (await SessionManager.list(ctx.cwd, SUBAGENT_SESSION_DIR)).find((item) => item.id === requestedId);
+      const saved = requestedId && (await SessionManager.list(childCwd, SUBAGENT_SESSION_DIR)).find((item) => item.id === requestedId);
       if (requestedId && !saved) throw new Error(`Subagent session not found: ${requestedId}`);
       const sessionManager = saved
-        ? SessionManager.open(saved.path, SUBAGENT_SESSION_DIR, ctx.cwd)
-        : SessionManager.create(ctx.cwd, SUBAGENT_SESSION_DIR);
+        ? SessionManager.open(saved.path, SUBAGENT_SESSION_DIR, childCwd)
+        : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR);
       const loader = systemPrompt
-        ? new DefaultResourceLoader({ cwd: ctx.cwd, agentDir: getAgentDir(), systemPromptOverride: (base) => `${base ?? ""}\n\n${systemPrompt}` })
+        ? new DefaultResourceLoader({ cwd: childCwd, agentDir: getAgentDir(), systemPromptOverride: (base) => `${base ?? ""}\n\n${systemPrompt}` })
         : undefined;
       await loader?.reload();
 
       const { session } = await createAgentSession({
-        cwd: ctx.cwd,
+        cwd: childCwd,
         model: targetModel,
         thinkingLevel: resolved?.thinkingLevel ?? thinking ?? ctx.thinkingLevel,
-        tools: tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
+        tools: childTools,
+        excludeTools: ["bg", "subagent"],
         modelRuntime: runtime,
         resourceLoader: loader,
         sessionManager,
@@ -426,49 +470,57 @@ export default function (pi: ExtensionAPI) {
       }, { once: true });
       const label = description?.trim() || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
       const displayModel = modelSpec ?? (ctx.model && `${ctx.model.provider}/${ctx.model.id}`) ?? "Pi default";
-      const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session, model: displayModel };
+      const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session, model: displayModel, cwd: childCwd, writer };
       jobs.set(pid, job);
 
-      const start = () => {
-        if (controller.signal.aborted) {
-          jobs.delete(pid);
-          session.dispose();
-          subagentQueue.shift()?.();
-          return syncStatus(ctx);
+      const pump = () => {
+        while (activeSubagents < 4) {
+          const index = subagentQueue.findIndex((queued) => !queued.writer || activeWriters === 0);
+          if (index < 0) return;
+          subagentQueue.splice(index, 1)[0].start?.();
         }
+      };
+      job.start = () => {
+        if (controller.signal.aborted) return;
         activeSubagents++;
+        if (writer) activeWriters++;
         job.state = "running";
         syncStatus(ctx);
         const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
-        let finalState: FinishedJob["state"] = "finished";
-        let finalOutput = "";
-        let finalUsage = "";
+        let finalized = false;
+        const finalize = (state: FinishedJob["state"], output = "", usage = "") => {
+          if (finalized) return;
+          finalized = true;
+          clearTimeout(timer);
+          activeSubagents--;
+          if (writer) activeWriters--;
+          jobs.delete(pid);
+          remember(job, state, { output, usage });
+          session.dispose();
+          syncStatus(ctx);
+          pump();
+        };
         void session.prompt(prompt).then(() => {
           const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
           const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
-          const text = rawText && truncateTail(rawText).content;
-          const error = message?.errorMessage;
+          const text = rawText ? truncateTail(rawText).content : "";
+          const error = message?.errorMessage as string | undefined;
           const usage = message?.usage;
-          finalOutput = text || "";
-          finalUsage = usage ? `↑${usage.input} ↓${usage.output}${usage.cost?.total ? ` $${usage.cost.total.toFixed(4)}` : ""}` : "";
-          finalState = timedOut ? "timed-out" : cancelled ? "stopped" : error ? "failed" : "finished";
+          const state: FinishedJob["state"] = timedOut ? "timed-out" : cancelled ? "stopped" : error ? "failed" : "finished";
           const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
-          deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${usageText}`, ctx, completion);
+          const recovery = state === "failed" ? `\n\nSession ${session.sessionId} can be resumed after correcting the error.` : "";
+          deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${recovery}${usageText}`, ctx, completion);
+          finalize(state, text, usage ? `↑${usage.input} ↓${usage.output}${usage.cost?.total ? ` $${usage.cost.total.toFixed(4)}` : ""}` : "");
         }).catch((error) => {
-          finalState = timedOut ? "timed-out" : cancelled ? "stopped" : "failed";
-          finalOutput = String(error);
-          deliverCompletion(`${getSubagentHeading(String(error), timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${error}`, ctx, completion);
-        }).finally(() => {
-          clearTimeout(timer);
-          activeSubagents--;
-          jobs.delete(pid);
-          remember(job, finalState, { output: finalOutput, usage: finalUsage });
-          session.dispose();
-          syncStatus(ctx);
-          subagentQueue.shift()?.();
+          const state: FinishedJob["state"] = timedOut ? "timed-out" : cancelled ? "stopped" : "failed";
+          const reason = error instanceof Error ? error.message : String(error);
+          deliverCompletion(`${getSubagentHeading(reason, timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${reason}\n\nSession ${session.sessionId} can be resumed after correcting the error.`, ctx, completion);
+          finalize(state, reason);
         });
       };
-      if (activeSubagents < 4) start(); else { subagentQueue.push(start); syncStatus(ctx); }
+      subagentQueue.push(job);
+      pump();
+      syncStatus(ctx);
 
       return {
         content: [{ type: "text", text: `${job.state === "running" ? "Started" : "Queued"}: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}` }],
