@@ -385,11 +385,18 @@ export default function (pi: ExtensionAPI) {
 
       modelRuntime ??= ModelRuntime.create();
       const runtime = await modelRuntime;
-      const modelSpec = model?.trim() || (ctx.model && `${ctx.model.provider}/${ctx.model.id}`);
+      for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
+        if (runtime.getRegisteredProviderIds().includes(providerId)) continue;
+        const native = ctx.modelRegistry.getRegisteredNativeProvider(providerId);
+        const config = ctx.modelRegistry.getRegisteredProviderConfig(providerId);
+        if (native) runtime.registerNativeProvider(native);
+        else if (config) runtime.registerProvider(providerId, config);
+      }
+      const modelSpec = model?.trim();
       const resolved = modelSpec ? resolveCliModel({ cliModel: modelSpec, cliThinking: thinking, modelRuntime: runtime }) : undefined;
       if (resolved?.error) throw new Error(resolved.error);
       if (resolved?.warning) console.warn(resolved.warning);
-      const targetModel = resolved?.model;
+      const targetModel = resolved?.model ?? ctx.model;
 
       mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
       const saved = requestedId && (await SessionManager.list(ctx.cwd, SUBAGENT_SESSION_DIR)).find((item) => item.id === requestedId);
@@ -405,7 +412,7 @@ export default function (pi: ExtensionAPI) {
       const { session } = await createAgentSession({
         cwd: ctx.cwd,
         model: targetModel,
-        thinkingLevel: resolved?.thinkingLevel ?? thinking,
+        thinkingLevel: resolved?.thinkingLevel ?? thinking ?? ctx.thinkingLevel,
         tools: tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
         modelRuntime: runtime,
         resourceLoader: loader,
@@ -420,7 +427,7 @@ export default function (pi: ExtensionAPI) {
         void session.abort();
       }, { once: true });
       const label = description?.trim() || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
-      const displayModel = modelSpec ?? "Pi default";
+      const displayModel = modelSpec ?? (ctx.model && `${ctx.model.provider}/${ctx.model.id}`) ?? "Pi default";
       const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session, model: displayModel };
       jobs.set(pid, job);
 
