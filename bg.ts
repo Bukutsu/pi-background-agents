@@ -28,9 +28,10 @@ function getSubagentHeading(error?: string, timedOut = false, cancelled = false)
   return timedOut ? "Background subagent timed out" : cancelled ? "Background subagent was stopped" : error ? "Background subagent failed" : "Background subagent finished";
 }
 
+const jobs: Map<number, BgJob> = (globalThis as any).__pi_bg_jobs ??= new Map<number, BgJob>();
+let nextVirtualPid: number = (globalThis as any).__pi_bg_next_pid ??= -1;
+
 export default function (pi: ExtensionAPI) {
-  const jobs = new Map<number, BgJob>();
-  let nextVirtualPid = -1;
   let modelRuntime: Promise<ModelRuntime> | undefined;
   let activeSubagents = 0;
   let activeWriters = 0;
@@ -198,7 +199,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     if (widgetTimer) clearInterval(widgetTimer);
-    for (const pid of [...jobs.keys()]) killJob(pid);
+    // Retain running subagent sessions across /reload; only clear UI handlers
   });
 
   async function manageJobs(ctx: ExtensionContext) {
