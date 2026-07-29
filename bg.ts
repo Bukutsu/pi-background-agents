@@ -39,18 +39,18 @@ interface FinishedJob {
   logFile?: string;
 }
 
-export function formatStatus(running: number, pending: number) {
+function formatStatus(running: number, pending: number) {
   return [running && `${running} bg`, pending && `${pending} bg done`].filter(Boolean).join(" · ");
 }
 
-export function getDeliveryOptions(isIdle: boolean, completion: "queue" | "continue") {
+function getDeliveryOptions(isIdle: boolean, completion: "queue" | "continue") {
   return {
     deliverAs: "steer" as const,
     triggerTurn: isIdle && completion === "continue",
   };
 }
 
-export function getSubagentHeading(error?: string, timedOut = false, cancelled = false) {
+function getSubagentHeading(error?: string, timedOut = false, cancelled = false) {
   return timedOut ? "Background subagent timed out" : cancelled ? "Background subagent was stopped" : error ? "Background subagent failed" : "Background subagent finished";
 }
 
@@ -91,8 +91,6 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer("pi-bg-result", (message, { expanded, outputPad }, theme) =>
     renderMessage(typeof message.content === "string" ? message.content : "", theme, outputPad, expanded)
   );
-
-  // Remove tool_call sleep blocker - triggerTurn: true handles turn wake-up cleanly
 
   function syncStatus(ctx: ExtensionContext) {
     try {

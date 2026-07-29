@@ -1,7 +1,5 @@
 # pi-bg
 
-[![CI](https://github.com/Bukutsu/pi-bg/actions/workflows/ci.yml/badge.svg)](https://github.com/Bukutsu/pi-bg/actions/workflows/ci.yml)
-
 Background task execution and subagent delegation extension for [Pi](https://pi.dev).
 
 Runs shell commands and isolated subagent tasks in the background while the main agent session continues.
