@@ -1,6 +1,6 @@
 import { createAgentSession, createLocalBashOperations, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
@@ -84,21 +84,31 @@ export default function (pi: ExtensionAPI) {
 
     active.ui.setWidget("bg-subagents", (_tui, theme) => {
       const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
-      const suffix = theme.fg("dim", " · /bg");
       return {
         render(width: number) {
-          const renderJob = (job: BgJob) => {
+          const count = activeJobs.length;
+          const label = ` Background Jobs (${count}) `;
+          const rightHint = " /bg ";
+          const ruleLen = Math.max(0, width - visibleWidth(label) - visibleWidth(rightHint) - 1);
+          const header = theme.fg("dim", "─") + theme.fg("accent", theme.bold(label)) + theme.fg("dim", "─".repeat(ruleLen)) + theme.fg("dim", rightHint);
+
+          const maxVisible = 3;
+          const overflow = count > maxVisible;
+          const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
+
+          const jobLines = visibleJobs.map((job) => {
             const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
             const icon = job.state === "queued" ? theme.fg("warning", "·") : theme.fg("accent", frame);
-            return truncateToWidth(`${icon} ${job.command} ${theme.fg("dim", `(${job.state}, ${elapsed}s)`)}${suffix}`, width);
-          };
+            const line = `  ${icon} ${job.command} ${theme.fg("dim", `(${job.state}, ${elapsed}s)`)}`;
+            return truncateToWidth(line, width);
+          });
 
-          const overflow = activeJobs.length > 3;
-          const lines = activeJobs.slice(0, overflow ? 2 : 3).map(renderJob);
           if (overflow) {
-            lines.push(truncateToWidth(`${theme.fg("accent", frame)} ${theme.fg("dim", `+${activeJobs.length - 2} more running`)}${suffix}`, width));
+            const hidden = count - 2;
+            jobLines.push(truncateToWidth(`  ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`, width));
           }
-          return lines;
+
+          return [truncateToWidth(header, width), ...jobLines];
         },
         invalidate() {},
       };
