@@ -84,13 +84,15 @@ export default function (pi: ExtensionAPI) {
 
     active.ui.setWidget("bg-subagents", (_tui, theme) => {
       const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
+      const bColor = (str: string) => theme.fg("dim", str);
       return {
         render(width: number) {
           const count = activeJobs.length;
-          const label = ` Background Jobs (${count}) `;
+          const innerWidth = Math.max(10, width - 2);
+          const title = ` Background Jobs (${count}) `;
           const rightHint = " /bg ";
-          const ruleLen = Math.max(0, width - visibleWidth(label) - visibleWidth(rightHint) - 1);
-          const header = theme.fg("dim", "─") + theme.fg("accent", theme.bold(label)) + theme.fg("dim", "─".repeat(ruleLen)) + theme.fg("dim", rightHint);
+          const topFillLen = Math.max(0, innerWidth - visibleWidth(title) - visibleWidth(rightHint));
+          const top = bColor("╭─") + theme.fg("accent", theme.bold(title)) + bColor("─".repeat(topFillLen)) + bColor(rightHint + "╮");
 
           const maxVisible = 3;
           const overflow = count > maxVisible;
@@ -99,16 +101,20 @@ export default function (pi: ExtensionAPI) {
           const jobLines = visibleJobs.map((job) => {
             const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
             const icon = job.state === "queued" ? theme.fg("warning", "·") : theme.fg("accent", frame);
-            const line = `  ${icon} ${job.command} ${theme.fg("dim", `(${job.state}, ${elapsed}s)`)}`;
-            return truncateToWidth(line, width);
+            const content = ` ${icon} ${job.command} ${theme.fg("dim", `(${job.state}, ${elapsed}s)`)}`;
+            const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+            return bColor("│") + truncateToWidth(content + fill, innerWidth) + bColor("│");
           });
 
           if (overflow) {
             const hidden = count - 2;
-            jobLines.push(truncateToWidth(`  ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`, width));
+            const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
+            const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+            jobLines.push(bColor("│") + truncateToWidth(content + fill, innerWidth) + bColor("│"));
           }
 
-          return [truncateToWidth(header, width), ...jobLines];
+          const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
+          return [truncateToWidth(top, width), ...jobLines, truncateToWidth(bottom, width)];
         },
         invalidate() {},
       };
