@@ -56,6 +56,7 @@ interface BgJob {
   toolFailures?: number;
   activeTools?: Map<string, string>;
   done?: Promise<void>;
+  completion?: "queue" | "continue";
   sessionLock?: string;
 }
 
@@ -234,7 +235,8 @@ export default function (pi: ExtensionAPI) {
             const icon = theme.fg("accent", frame);
             const progress = job.activity ? `, ${job.activity}` : "";
             const badgeText = job.session?.model ? `${job.session.model.id}:${job.session.thinkingLevel}` : job.badge;
-            const badge = badgeText ? ` [${badgeText}]` : "";
+            const queueTag = job.completion === "queue" ? " Q" : "";
+            const badge = badgeText ? ` [${badgeText}${queueTag}]` : queueTag ? ` [${queueTag.trim()}]` : "";
             const content = ` ${icon} ${job.command}${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
             const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
             return bColor("│") + truncateToWidth(content + fill, innerWidth) + bColor("│");
@@ -305,7 +307,7 @@ export default function (pi: ExtensionAPI) {
     const controller = new AbortController();
     let output = "";
     let outputTruncated = false;
-    const job: BgJob = { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell" };
+    const job: BgJob = { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell", completion };
     jobs.set(pid, job);
     syncStatus(ctx);
 
@@ -348,7 +350,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     return {
-      content: [{ type: "text" as const, text: `Started shell job ${pid}: ${shownCommand}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.` }],
+      content: [{ type: "text" as const, text: `Started shell job ${pid}: ${shownCommand}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, check /bg for the saved output." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use /bg to view or stop the task.` }],
       details: { pid },
     };
   }
@@ -731,7 +733,7 @@ export default function (pi: ExtensionAPI) {
       };
       const job: BgJob = {
         pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId,
-        controller, kind: "subagent", session, activity: "starting", badge: `${session.model.id}:${session.thinkingLevel}`,
+        controller, kind: "subagent", session, activity: "starting", badge: `${session.model.id}:${session.thinkingLevel}`, completion,
         baseline: session.getSessionStats(), record, toolFailures: 0, activeTools: new Map(), sessionLock,
       };
       try {
@@ -827,7 +829,7 @@ export default function (pi: ExtensionAPI) {
       const location = branch ? `\nBranch: ${branch}\nWorktree: ${childCwd}` : "";
       const fallback = modelFallbackMessage ? `\nModel fallback: ${modelFallbackMessage}` : "";
       return {
-        content: [{ type: "text", text: `${existing ? "Continued" : "Created"}: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}:${session.thinkingLevel}\nCwd: ${childCwd}\nTools: ${actualTools.join(", ")}\nContext: ${record.context}${location}${fallback}` }],
+        content: [{ type: "text", text: `${existing ? "Continued" : "Created"}: Subagent: ${label}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, the result is lost but the session remains resumable." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}:${session.thinkingLevel}\nCwd: ${childCwd}\nTools: ${actualTools.join(", ")}\nContext: ${record.context}\nCompletion: ${completion}${location}${fallback}` }],
         details: { pid, sessionId: session.sessionId, sessionFile, model: displayModel, thinking: session.thinkingLevel, cwd: childCwd, inheritedTools: actualTools, context: record.context, state: record.state, continued: Boolean(existing), ...(branch ? { branch } : {}), ...(modelFallbackMessage ? { modelFallback: modelFallbackMessage } : {}) },
       };
     },
