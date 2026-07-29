@@ -42,14 +42,39 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  function syncStatus(ctx: ExtensionContext) {
-    ctx.ui.setStatus("bg-jobs", jobs.size ? `${ctx.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
+  let currentCtx: ExtensionContext | undefined;
+
+  function getActiveCtx(ctx?: ExtensionContext): ExtensionContext | undefined {
+    if (ctx) {
+      try {
+        void ctx.hasUI;
+        return ctx;
+      } catch {
+        // Context is stale after session replacement or reload
+      }
+    }
+    if (currentCtx) {
+      try {
+        void currentCtx.hasUI;
+        return currentCtx;
+      } catch {
+        // Context is stale after session replacement or reload
+      }
+    }
+    return undefined;
   }
 
-  function deliverCompletion(message: string, ctx: ExtensionContext, completion: "queue" | "continue") {
+  function syncStatus(ctx?: ExtensionContext) {
+    const active = getActiveCtx(ctx);
+    if (!active) return;
+    active.ui.setStatus("bg-jobs", jobs.size ? `${active.ui.theme.fg("accent", "● ")}${jobs.size} bg` : undefined);
+  }
+
+  function deliverCompletion(message: string, ctx: ExtensionContext | undefined, completion: "queue" | "continue") {
+    const active = getActiveCtx(ctx);
     pi.sendMessage(
       { customType: "pi-bg-result", content: message, display: true },
-      completion === "queue" ? { deliverAs: "nextTurn" } : { deliverAs: "steer", triggerTurn: ctx.isIdle() },
+      completion === "queue" ? { deliverAs: "nextTurn" } : { deliverAs: "steer", triggerTurn: active?.isIdle() ?? false },
     );
   }
 
@@ -78,6 +103,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext) {
+    currentCtx = ctx;
     const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
     const pid = nextVirtualPid--;
     const controller = new AbortController();
@@ -128,15 +154,20 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  pi.on("session_start", (_e, ctx) => syncStatus(ctx));
+  pi.on("session_start", (_e, ctx) => {
+    currentCtx = ctx;
+    syncStatus(ctx);
+  });
 
   pi.on("session_shutdown", () => {
     for (const pid of [...jobs.keys()]) killJob(pid);
   });
 
   async function manageJobs(ctx: ExtensionContext) {
-    if (jobs.size === 0) return ctx.ui.notify("No background jobs running", "info");
-    const choice = await ctx.ui.select("Select job to stop:", [
+    const active = getActiveCtx(ctx);
+    if (!active?.hasUI) return;
+    if (jobs.size === 0) return active.ui.notify("No background jobs running", "info");
+    const choice = await active.ui.select("Select job to stop:", [
       "Cancel",
       ...Array.from(jobs.values(), (job) =>
         `⚙ [${job.pid}] ${job.state === "queued" ? "queued " : ""}${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
@@ -144,8 +175,8 @@ export default function (pi: ExtensionAPI) {
     ]);
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
     if (choice !== "Cancel" && Number.isInteger(pid) && killJob(pid)) {
-      ctx.ui.notify(`Stopped background job ${pid}`, "info");
-      syncStatus(ctx);
+      active.ui.notify(`Stopped background job ${pid}`, "info");
+      syncStatus(active);
     }
   }
 
@@ -157,24 +188,26 @@ export default function (pi: ExtensionAPI) {
       return items.length ? items : null;
     },
     handler: async (args, ctx) => {
+      currentCtx = ctx;
+      const active = getActiveCtx(ctx);
       const trimmed = args?.trim() ?? "";
       const killMatch = trimmed.match(/^(?:kill\s+)?(-?\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);
         if (killJob(pid)) {
-          ctx.ui.notify(`Killed background job ${pid}`, "info");
-          syncStatus(ctx);
+          active?.ui.notify(`Killed background job ${pid}`, "info");
+          syncStatus(active);
         } else {
-          ctx.ui.notify(`No background job found with ID ${pid}`, "error");
+          active?.ui.notify(`No background job found with ID ${pid}`, "error");
         }
         return;
       }
       if (trimmed.startsWith("kill")) {
-        ctx.ui.notify("Usage: /bg kill <pid>", "error");
+        active?.ui.notify("Usage: /bg kill <pid>", "error");
         return;
       }
 
-      if (ctx.hasUI) await manageJobs(ctx);
+      if (active?.hasUI) await manageJobs(active);
     },
   });
 
@@ -195,6 +228,7 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
     async execute(id, { action = "spawn", command, pid, timeoutSec = 600 }, _sig, _up, ctx) {
+      currentCtx = ctx;
       if (action === "status") {
         const listed = Array.from(jobs.values()).filter((job) => job.kind === "shell");
         const text = listed.map((job) => `${job.pid} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`);
@@ -238,6 +272,7 @@ export default function (pi: ExtensionAPI) {
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
     async execute(_id, { action = "spawn", prompt, description, sessionId, message, completion = "continue", model, thinking, tools, cwd, timeoutSec = 600 }, _sig, _up, ctx) {
+      currentCtx = ctx;
       const requestedId = sessionId?.trim();
       const matching = requestedId ? Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId) : undefined;
       if (action === "status") {
