@@ -87,15 +87,18 @@ export default function (pi: ExtensionAPI) {
       const suffix = theme.fg("dim", " · /bg");
       return {
         render(width: number) {
-          const count = activeJobs.length;
-          const icon = theme.fg("accent", frame);
-          const summaries = activeJobs.slice(0, 3).map((job) => {
+          const renderJob = (job: BgJob) => {
             const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-            return `${job.command} (${job.state}, ${elapsed}s)`;
-          }).join(", ");
-          const extra = count > 3 ? theme.fg("dim", `, +${count - 3} more`) : "";
-          const text = `${icon} ${theme.fg("text", `${count} running:`)} ${summaries}${extra}${suffix}`;
-          return [truncateToWidth(text, width)];
+            const icon = job.state === "queued" ? theme.fg("warning", "·") : theme.fg("accent", frame);
+            return truncateToWidth(`${icon} ${job.command} ${theme.fg("dim", `(${job.state}, ${elapsed}s)`)}${suffix}`, width);
+          };
+
+          const overflow = activeJobs.length > 3;
+          const lines = activeJobs.slice(0, overflow ? 2 : 3).map(renderJob);
+          if (overflow) {
+            lines.push(truncateToWidth(`${theme.fg("accent", frame)} ${theme.fg("dim", `+${activeJobs.length - 2} more running`)}${suffix}`, width));
+          }
+          return lines;
         },
         invalidate() {},
       };
