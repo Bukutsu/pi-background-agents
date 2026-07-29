@@ -1,4 +1,4 @@
-import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -380,9 +380,10 @@ export default function (pi: ExtensionAPI) {
       modelRuntime ??= ModelRuntime.create();
       const runtime = await modelRuntime;
       const modelSpec = model?.trim() || (ctx.model && `${ctx.model.provider}/${ctx.model.id}`);
-      const [provider, ...modelParts] = modelSpec?.split("/") ?? [];
-      const targetModel = modelParts.length ? runtime.getModel(provider, modelParts.join("/")) : undefined;
-      if (modelSpec && !targetModel) throw new Error(`Model not found: ${modelSpec}. Use provider/model.`);
+      const resolved = modelSpec ? resolveCliModel({ cliModel: modelSpec, cliThinking: thinking, modelRuntime: runtime }) : undefined;
+      if (resolved?.error) throw new Error(resolved.error);
+      if (resolved?.warning) console.warn(resolved.warning);
+      const targetModel = resolved?.model;
 
       mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
       const saved = requestedId && (await SessionManager.list(ctx.cwd, SUBAGENT_SESSION_DIR)).find((item) => item.id === requestedId);
@@ -391,14 +392,14 @@ export default function (pi: ExtensionAPI) {
         ? SessionManager.open(saved.path, SUBAGENT_SESSION_DIR, ctx.cwd)
         : SessionManager.create(ctx.cwd, SUBAGENT_SESSION_DIR);
       const loader = systemPrompt
-        ? new DefaultResourceLoader({ cwd: ctx.cwd, agentDir: getAgentDir(), systemPromptOverride: () => `${ctx.getSystemPrompt()}\n\n${systemPrompt}` })
+        ? new DefaultResourceLoader({ cwd: ctx.cwd, agentDir: getAgentDir(), systemPromptOverride: (base) => `${base ?? ""}\n\n${systemPrompt}` })
         : undefined;
       await loader?.reload();
 
       const { session } = await createAgentSession({
         cwd: ctx.cwd,
         model: targetModel,
-        thinkingLevel: thinking,
+        thinkingLevel: resolved?.thinkingLevel ?? thinking,
         tools: tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
         modelRuntime: runtime,
         resourceLoader: loader,
