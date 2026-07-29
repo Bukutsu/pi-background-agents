@@ -1,33 +1,29 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import extension, { formatStatus, getDeliveryOptions } from "./bg.ts";
+import extension, { formatStatus, getDeliveryOptions, getSubagentHeading } from "./bg.ts";
 
 const tools = new Map<string, any>();
+const commands = new Map<string, any>();
 const events = new Map<string, Function>();
 const entries: Array<{ content: string }> = [];
 const messages: unknown[] = [];
 
 extension({
   registerTool(tool: any) { tools.set(tool.name, tool); },
-  registerCommand() {},
+  registerCommand(name: string, command: any) { commands.set(name, command); },
   registerShortcut() {},
   registerEntryRenderer() {},
   registerMessageRenderer() {},
   on(name: string, handler: Function) { events.set(name, handler); },
   appendEntry(_type: string, data: { content: string }) { entries.push(data); },
   sendMessage(message: unknown) { messages.push(message); },
-  async exec(command: string, args: string[], options: { cwd?: string; signal?: AbortSignal }) {
-    const proc = Bun.spawn([command, ...args], { cwd: options.cwd, signal: options.signal, stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    return { stdout, stderr, code, killed: proc.signalCode !== null };
-  },
   events: { emit() {}, on() {} },
 } as any);
 
 const ctx = {
   cwd: process.cwd(),
   isIdle: () => true,
-  ui: { setStatus() {}, setTitle() {}, theme: { fg: (_color: string, text: string) => text } },
+  ui: { setStatus() {}, setTitle() {}, notify() {}, theme: { fg: (_color: string, text: string) => text } },
 } as any;
 
 async function waitForEntries(count: number) {
@@ -48,6 +44,11 @@ test("background status shows running and queued results", () => {
   expect(formatStatus(2, 1)).toBe("2 bg · 1 bg done");
 });
 
+test("subagent completion distinguishes timeout and cancellation", () => {
+  expect(getSubagentHeading(undefined, true)).toBe("Background subagent timed out");
+  expect(getSubagentHeading(undefined, false, true)).toBe("Background subagent was stopped");
+});
+
 test("background job lifecycle", async () => {
   const bg = tools.get("bg");
 
@@ -66,10 +67,16 @@ test("background job lifecycle", async () => {
   const timeout = await bg.execute("timeout", { command: "sleep 2", timeoutSec: 0.05 }, undefined, undefined, ctx);
   await waitForEntries(3);
   expect(entries[2].content).toContain("timed out");
+
+  const cancelled = await bg.execute("cancel", { command: "sleep 2", timeoutSec: 5 }, undefined, undefined, ctx);
+  await commands.get("bg").handler(`kill ${cancelled.details.pid}`, ctx);
+  await waitForEntries(4);
+  expect(entries[3].content).toContain("was stopped");
   expect(messages).toHaveLength(0);
 
   rmSync(long.details.logFile, { force: true });
   rmSync(timeout.details.logFile, { force: true });
+  rmSync(cancelled.details.logFile, { force: true });
 });
 
 afterAll(() => {

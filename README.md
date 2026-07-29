@@ -16,7 +16,8 @@ pi install git:github.com/Bukutsu/pi-bg
 
 - **Background shell execution**: Run non-blocking terminal commands via the `bg` tool.
 - **Subagent delegation**: Delegate tasks to separate subagent instances via the `subagent` tool.
-- **Session persistence**: Maintain subagent conversation state across multiple turns using session IDs.
+- **Session persistence and control**: Resume, inspect, steer, or stop subagents using session IDs.
+- **Bounded parallelism**: Run four subagents concurrently and queue excess work automatically.
 - **Configurable completion behavior**: Queue subagent results for the user's next prompt or wake the parent agent immediately upon completion.
 - **Interactive task management**: View running jobs and terminate processes using the `/bg` command.
 
@@ -35,10 +36,10 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 
 #### Behavior & Output
 
-- Returns immediately while Pi's SDK executes the process.
+- Output streams directly to a private temporary log while the process runs.
 - When execution finishes, the result entry (`pi-bg-result`) is appended to session history.
 - Results are truncated to Pi's standard 50 KB or 2,000-line limit, keeping the tail and linking to the full log.
-- Full output is retained in `/tmp/pi-bg/<uuid>.log` only for failed or truncated runs.
+- The log is deleted after successful untruncated completion and retained for failed, timed-out, stopped, or truncated runs.
 
 #### Example
 
@@ -53,14 +54,17 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 
 ### `subagent`
 
-Spawns an isolated `pi` background process to execute a subagent task.
+Runs an isolated Pi SDK session in the background. It can also inspect, steer, or stop active subagents.
 
 #### Parameters
 
 | Parameter | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `prompt` | `string` | Yes | — | Task instructions for the subagent. |
-| `sessionId` | `string` | No | Generated UUID | Session ID for stateful subagent conversations. |
+| `action` | `string` | No | `"spawn"` | `"spawn"`, `"status"`, `"steer"`, or `"stop"`. |
+| `prompt` | `string` | For spawn | — | Task instructions for the subagent. |
+| `description` | `string` | No | Prompt prefix | Short label shown in job status. |
+| `sessionId` | `string` | For control/resume | Generated UUID | Session ID to continue, inspect, steer, or stop. |
+| `message` | `string` | For steer | — | Message sent to a running subagent. |
 | `completion` | `string` | No | `"continue"` | Delivery mode: `"queue"` or `"continue"`. |
 | `model` | `string` | No | Parent model | Target model specifier (e.g. `anthropic/claude-3-5-sonnet` or model ID). |
 | `thinking` | `string` | No | — | Thinking effort level (`"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`). |
@@ -75,8 +79,10 @@ Spawns an isolated `pi` background process to execute a subagent task.
   - When `sessionId` is omitted, a new session is created and its ID is returned.
   - A supplied `sessionId` must identify an existing subagent session.
   - Reusing a `sessionId` while that session is running results in an error.
+- At most four subagents run simultaneously; additional calls wait in a FIFO queue and remain cancellable.
+- Pi can launch independent work in parallel by making multiple `subagent` calls in one turn.
 - **Completion modes**:
-  - `"queue"` (default): Delivers subagent results to context. If the parent agent is idle when completed, the result is queued (`nextTurn`) and status displays `bg done` without triggering an agent turn until the user sends a message.
+  - `"queue"`: Delivers subagent results to context. If the parent agent is idle when completed, status displays `bg done` without triggering an agent turn until the user sends a message.
   - `"continue"`: Delivers result and immediately triggers a new agent turn (`triggerTurn: true`) if the parent agent is idle.
 - **Project context**: The SDK session runs in the parent working directory with Pi's normal resource discovery.
 - **System prompt**: `systemPrompt` is appended through Pi's `DefaultResourceLoader`; no temporary prompt file is created.
@@ -108,8 +114,17 @@ Autonomous continuation mode:
 ```json
 {
   "prompt": "Run benchmark suite and write report",
+  "description": "Benchmark report",
   "completion": "continue"
 }
+```
+
+Inspect or redirect active work:
+
+```json
+{ "action": "status" }
+{ "action": "steer", "sessionId": "<session-id>", "message": "Focus on the failing integration test" }
+{ "action": "stop", "sessionId": "<session-id>" }
 ```
 
 ## CLI Command (`/bg`)
@@ -125,7 +140,7 @@ The `/bg` command manages running background processes.
 
 ### Process Termination
 
-Pi's SDK handles cross-platform process-tree termination. When the parent session shuts down, all active jobs are aborted.
+On Unix, cancellation signals the detached process group and escalates to `SIGKILL` after two seconds. On Windows it uses `taskkill /T`. When the parent session shuts down, all active jobs are aborted.
 
 ## Status Line Indicators
 

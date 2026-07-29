@@ -1,10 +1,11 @@
 import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +18,9 @@ interface BgJob {
   startedAt: number;
   sessionId?: string;
   controller: AbortController;
+  kind: "shell" | "subagent";
+  state: "queued" | "running";
+  session?: AgentSession;
 }
 
 export function formatStatus(running: number, pending: number) {
@@ -30,11 +34,17 @@ export function getDeliveryOptions(isIdle: boolean, completion: "queue" | "conti
   };
 }
 
+export function getSubagentHeading(error?: string, timedOut = false, cancelled = false) {
+  return timedOut ? "Background subagent timed out" : cancelled ? "Background subagent was stopped" : error ? "Background subagent failed" : "Background subagent finished";
+}
+
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
   let pendingResults = 0;
   let nextVirtualPid = -1;
   let modelRuntime: Promise<ModelRuntime> | undefined;
+  let activeSubagents = 0;
+  const subagentQueue: Array<() => void> = [];
 
   const renderMessage = (content: string, theme: Theme, padding: number) => {
     const newline = content.indexOf("\n");
@@ -64,6 +74,15 @@ export default function (pi: ExtensionAPI) {
     } catch {}
   }
 
+  function deliverCompletion(message: string, ctx: ExtensionContext, completion: "queue" | "continue") {
+    const isIdle = ctx.isIdle();
+    pi.sendMessage({ customType: "pi-bg-result", content: message, display: true }, getDeliveryOptions(isIdle, completion));
+    if (isIdle && completion === "queue") {
+      pendingResults++;
+      syncStatus(ctx);
+    }
+  }
+
   function killJob(pid: number): boolean {
     const job = jobs.get(pid);
     if (!job) return false;
@@ -73,39 +92,57 @@ export default function (pi: ExtensionAPI) {
 
   function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext) {
     const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
-    const pid = nextVirtualPid--;
-    const controller = new AbortController();
+    mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
     const logFile = join(LOG_DIR, `${randomUUID()}.log`);
+    const out = openSync(logFile, "wx", 0o600);
+    let proc;
+    try {
+      proc = spawn("bash", ["-c", command], { cwd: ctx.cwd, detached: true, stdio: ["ignore", out, out] });
+    } finally {
+      closeSync(out);
+    }
+    proc.unref();
+
+    const pid = proc.pid;
+    const controller = new AbortController();
     let timedOut = false;
+    let cancelled = false;
+    controller.signal.addEventListener("abort", () => {
+      cancelled = !timedOut;
+      if (!pid) return;
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/T", "/PID", String(pid)], { stdio: "ignore" });
+        setTimeout(() => { if (jobs.has(pid)) spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" }); }, 2000).unref();
+      } else {
+        try { process.kill(-pid, "SIGINT"); } catch { try { process.kill(pid, "SIGINT"); } catch {} }
+        setTimeout(() => {
+          if (!jobs.has(pid)) return;
+          try { process.kill(-pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch {} }
+        }, 2000).unref();
+      }
+    }, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
-    jobs.set(pid, { pid, command: shownCommand, startedAt: Date.now(), controller });
+    if (pid) jobs.set(pid, { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell", state: "running" });
     syncStatus(ctx);
 
-    void pi.exec("bash", ["-c", command], { cwd: ctx.cwd, signal: controller.signal }).then(({ stdout, stderr, code, killed }) => {
-      const content = `${stdout}${stderr}`.trim();
+    let spawnError: string | undefined;
+    proc.once("error", (error) => { spawnError = error.message; });
+    proc.once("close", (code) => {
+      clearTimeout(timer);
+      if (pid) jobs.delete(pid);
+      const content = readFileSync(logFile, "utf8").trim();
       const truncated = truncateTail(content);
-      const keepLog = code !== 0 || truncated.truncated;
-      if (keepLog) {
-        mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-        writeFileSync(logFile, content, { mode: 0o600 });
-      }
+      const keepLog = code !== 0 || Boolean(spawnError) || truncated.truncated;
       const heading = timedOut
         ? `Background task timed out after ${timeoutSec} seconds`
-        : code === 0
-        ? "Background task finished"
-        : killed
-        ? "Background task was stopped"
+        : cancelled ? "Background task was stopped"
+        : spawnError ? "Background task could not start"
+        : code === 0 ? "Background task finished"
         : "Background task failed";
       const result = content ? `\n\nResult:\n${truncated.content}${truncated.truncated ? `\n\nThe result was shortened. Full result: ${logFile}` : ""}` : "";
-      const reason = code ? `\n\nExit code: ${code}` : "";
+      const reason = spawnError ? `\n\nReason: ${spawnError}` : code ? `\n\nExit code: ${code}` : "";
       pi.appendEntry("pi-bg-result", { content: `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}` });
-    }).catch((error) => {
-      mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-      writeFileSync(logFile, String(error), { mode: 0o600 });
-      pi.appendEntry("pi-bg-result", { content: `Background task could not start\nTask: ${shownCommand}\n\nReason: ${error}\n\nTroubleshooting log: ${logFile}` });
-    }).finally(() => {
-      clearTimeout(timer);
-      jobs.delete(pid);
+      if (!keepLog) unlinkSync(logFile);
       syncStatus(ctx);
     });
 
@@ -151,7 +188,7 @@ export default function (pi: ExtensionAPI) {
     const choice = await ctx.ui.select("Select job to stop:", [
       "Cancel",
       ...Array.from(jobs.values(), (job) =>
-        `⚙ [${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
+        `⚙ [${job.pid}] ${job.state === "queued" ? "queued " : ""}${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
       ),
     ]);
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
@@ -227,10 +264,14 @@ export default function (pi: ExtensionAPI) {
       "Provide complete and self-contained instructions in prompt so the subagent has full context to complete the task.",
       "Reuse sessionId from an earlier subagent result to continue conversation state with that subagent.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
+      "For independent tasks, call subagent multiple times in one turn; Pi runs sibling tool calls in parallel.",
     ],
     parameters: Type.Object({
-      prompt: Type.String({ description: "Task" }),
-      sessionId: Type.Optional(Type.String({ description: "Session ID from an earlier subagent result to continue it" })),
+      action: Type.Optional(StringEnum(["spawn", "status", "steer", "stop"] as const, { description: "Action (default: spawn)" })),
+      prompt: Type.Optional(Type.String({ description: "Task for spawn" })),
+      description: Type.Optional(Type.String({ description: "Short job label" })),
+      sessionId: Type.Optional(Type.String({ description: "Session ID to continue or control" })),
+      message: Type.Optional(Type.String({ description: "Steering message" })),
       completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next prompt" })),
       model: Type.Optional(Type.String({ description: "Preferred model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level" })),
@@ -238,8 +279,30 @@ export default function (pi: ExtensionAPI) {
       tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    async execute(id, { prompt, sessionId, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { action = "spawn", prompt, description, sessionId, message, completion = "continue", model, thinking, systemPrompt, tools, timeoutSec = 600 }, _sig, _up, ctx) {
       const requestedId = sessionId?.trim();
+      const matching = requestedId && Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId);
+      if (action === "status") {
+        const listed = Array.from(jobs.values()).filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
+        return { content: [{ type: "text" as const, text: listed.length ? listed.map((job) => `${job.sessionId} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`).join("\n") : "No matching subagents." }], details: { jobs: listed.map(({ controller, session, ...job }) => job) } };
+      }
+      if (action === "stop") {
+        if (!matching) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
+        matching.controller.abort();
+        if (matching.state === "queued") {
+          jobs.delete(matching.pid);
+          syncStatus(ctx);
+        }
+        return { content: [{ type: "text" as const, text: `Stopped subagent ${matching.sessionId}` }], details: { sessionId: matching.sessionId } };
+      }
+      if (action === "steer") {
+        if (!matching?.session || matching.state !== "running") throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
+        if (!message?.trim()) throw new Error("message is required for steer");
+        await matching.session.steer(message.trim());
+        return { content: [{ type: "text" as const, text: `Steered subagent ${matching.sessionId}` }], details: { sessionId: matching.sessionId } };
+      }
+      if (!prompt?.trim()) throw new Error("prompt is required for spawn");
+      prompt = prompt.trim();
       if (requestedId && Array.from(jobs.values()).some((job) => job.sessionId === requestedId)) {
         throw new Error(`Subagent session ${requestedId} is already running`);
       }
@@ -274,36 +337,52 @@ export default function (pi: ExtensionAPI) {
       });
       const pid = nextVirtualPid--;
       const controller = new AbortController();
-      controller.signal.addEventListener("abort", () => void session.abort(), { once: true });
-      const label = prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt;
-      jobs.set(pid, { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller });
-      syncStatus(ctx);
+      let timedOut = false;
+      let cancelled = false;
+      controller.signal.addEventListener("abort", () => {
+        cancelled = !timedOut;
+        void session.abort();
+      }, { once: true });
+      const label = description?.trim() || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
+      const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session };
+      jobs.set(pid, job);
 
-      const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
-      void session.prompt(prompt).then(() => {
-        const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
-        const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
-        const text = rawText && truncateTail(rawText).content;
-        const error = message?.errorMessage;
-        const usage = message?.usage;
-        const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
-        const msg = `${error ? "Background subagent failed" : "Background subagent finished"}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${usageText}`;
-        const isIdle = ctx.isIdle();
-        pi.sendMessage({ customType: "pi-bg-result", content: msg, display: true }, getDeliveryOptions(isIdle, completion));
-        if (isIdle && completion === "queue") pendingResults++;
-      }).catch((error) => {
-        pi.sendMessage({ customType: "pi-bg-result", content: `Background subagent failed\nTask: Subagent: ${label}\n\nReason: ${error}`, display: true }, getDeliveryOptions(ctx.isIdle(), completion));
-      }).finally(() => {
-        clearTimeout(timer);
-        jobs.delete(pid);
-        session.dispose();
+      const start = () => {
+        if (controller.signal.aborted) {
+          jobs.delete(pid);
+          session.dispose();
+          subagentQueue.shift()?.();
+          return syncStatus(ctx);
+        }
+        activeSubagents++;
+        job.state = "running";
         syncStatus(ctx);
-      });
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
+        void session.prompt(prompt).then(() => {
+          const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
+          const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
+          const text = rawText && truncateTail(rawText).content;
+          const error = message?.errorMessage;
+          const usage = message?.usage;
+          const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
+          deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${usageText}`, ctx, completion);
+        }).catch((error) => {
+          deliverCompletion(`${getSubagentHeading(String(error), timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${error}`, ctx, completion);
+        }).finally(() => {
+          clearTimeout(timer);
+          activeSubagents--;
+          jobs.delete(pid);
+          session.dispose();
+          syncStatus(ctx);
+          subagentQueue.shift()?.();
+        });
+      };
+      if (activeSubagents < 4) start(); else { subagentQueue.push(start); syncStatus(ctx); }
 
       const displayModel = modelSpec ?? "Pi default";
       return {
-        content: [{ type: "text", text: `Started: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use /bg to view or stop the task.\nSession: ${session.sessionId}\nModel: ${displayModel}` }],
-        details: { pid, sessionId: session.sessionId, model: displayModel },
+        content: [{ type: "text", text: `${job.state === "running" ? "Started" : "Queued"}: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}` }],
+        details: { pid, sessionId: session.sessionId, model: displayModel, state: job.state },
       };
     },
   });
