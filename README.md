@@ -33,12 +33,13 @@ Runs a shell command in the background using Pi's native process API.
 | --- | --- | --- | --- | --- |
 | `action` | `string` | No | `"spawn"` | `"spawn"`, `"status"`, or `"stop"`. |
 | `command` | `string` | For spawn | — | Shell command to execute. |
+| `completion` | `string` | No | `"continue"` | Delivery mode: `"queue"` or `"continue"`. |
 | `pid` | `number` | For stop | — | Running shell job ID. |
 | `timeoutSec` | `number` | No | `600` | Timeout in seconds (min: `1`, max: `2147483`). |
 
 #### Behavior & Output
 
-- When execution finishes, the result (`pi-bg-result`) is queued for the next turn.
+- When execution finishes, the result (`pi-bg-result`) is delivered immediately (or queued for the next turn if `completion: "queue"`).
 - Output is bounded while running and truncated to Pi's standard 50 KB or 2,000-line limit, keeping the tail.
 - Failed or truncated output tails are retained in a private temporary log.
 
@@ -97,7 +98,7 @@ Single background task:
   "prompt": "Analyze code coverage report in coverage/lcov.info",
   "model": "anthropic/claude-3-5-haiku",
   "thinking": "low",
-  "tools": "read,grep,find,ls"
+  "tools": "read,bash"
 }
 ```
 

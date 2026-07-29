@@ -102,7 +102,7 @@ export default function (pi: ExtensionAPI) {
     return target;
   }
 
-  function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext) {
+  function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext, completion: "queue" | "continue" = "continue") {
     currentCtx = ctx;
     const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
     const pid = nextVirtualPid--;
@@ -140,9 +140,10 @@ export default function (pi: ExtensionAPI) {
         : exitCode === 0 ? "Background task finished" : "Background task failed";
       const result = content ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Retained tail: ${logFile}` : ""}` : "";
       const reason = failed ? `\n\nReason: ${message}` : exitCode ? `\n\nExit code: ${exitCode}` : "";
-      pi.sendMessage(
-        { customType: "pi-bg-result", content: `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`, display: true },
-        { deliverAs: "nextTurn" },
+      deliverCompletion(
+        `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
+        ctx,
+        completion,
       );
       jobs.delete(pid);
       syncStatus(ctx);
@@ -224,10 +225,11 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["spawn", "status", "stop"] as const, { description: "Action (default: spawn)" })),
       command: Type.Optional(Type.String({ description: "Shell command for spawn" })),
+      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next prompt" })),
       pid: Type.Optional(Type.Number({ description: "Job ID for stop" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    async execute(id, { action = "spawn", command, pid, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(id, { action = "spawn", command, completion = "continue", pid, timeoutSec = 600 }, _sig, _up, ctx) {
       currentCtx = ctx;
       if (action === "status") {
         const listed = Array.from(jobs.values()).filter((job) => job.kind === "shell");
@@ -241,7 +243,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: `Stopped shell job ${pid}` }], details: { pid } };
       }
       if (!command?.trim()) throw new Error("command is required for spawn");
-      return runBgProcess(command.trim(), timeoutSec, ctx);
+      return runBgProcess(command.trim(), timeoutSec, ctx, completion);
     },
   });
 
@@ -257,6 +259,7 @@ export default function (pi: ExtensionAPI) {
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
       "For independent read-only tasks, call subagent multiple times in one turn; Pi runs sibling tool calls in parallel.",
       "Writing subagents are serialized automatically; use read-only tool allowlists for parallel investigation.",
+      "After starting subagent, continue work immediately; never wait, sleep, or poll action: status for completion. Results arrive automatically.",
     ],
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["spawn", "status", "steer", "stop"] as const, { description: "Action (default: spawn)" })),
