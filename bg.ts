@@ -388,7 +388,7 @@ export default function (pi: ExtensionAPI) {
         const listed = Array.from(jobs.values()).filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
         const recent = history.filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
         const text = [...listed.map((job) => `${job.sessionId} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`), ...recent.map(describeFinished)];
-        return { content: [{ type: "text" as const, text: text.join("\n") || "No matching subagents." }], details: { jobs: listed.map(({ controller, session, ...job }) => job), history: recent } };
+        return { content: [{ type: "text" as const, text: text.join("\n") || "No matching subagents." }], details: {} };
       }
       if (action === "stop") {
         if (!matching) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
