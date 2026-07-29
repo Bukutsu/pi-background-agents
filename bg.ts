@@ -121,7 +121,7 @@ export default function (pi: ExtensionAPI) {
     }, { placement: "aboveEditor" });
 
     if (!widgetTimer) {
-      widgetTimer = setInterval(() => syncStatus(ctx), 100);
+      widgetTimer = setInterval(() => syncStatus(), 100);
     }
   }
 
@@ -144,6 +144,7 @@ export default function (pi: ExtensionAPI) {
       job.session?.dispose();
       pumpSubagents();
     }
+    // Running jobs are deleted in their own finish/finalize path once abort resolves
     return true;
   }
 
@@ -438,7 +439,7 @@ export default function (pi: ExtensionAPI) {
           deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${recovery}${usageText}`, ctx, completion);
         }, (error) => {
           const reason = error instanceof Error ? error.message : String(error);
-          deliverCompletion(`${getSubagentHeading(reason, timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${reason}\n\nSession ${session.sessionId} can be resumed after correcting the error.`, ctx, completion);
+          deliverCompletion(`${getSubagentHeading(reason, timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${reason}\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`, ctx, completion);
         }).finally(finalize);
       };
       subagentQueue.push(job);
