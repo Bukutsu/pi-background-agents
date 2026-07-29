@@ -15,6 +15,7 @@
   "author": "Bukutsu",
   "files": [
     "bg.ts",
+    "skills",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -37,6 +38,9 @@
   "pi": {
     "extensions": [
       "./bg.ts"
+    ],
+    "skills": [
+      "./skills/git-worktree"
     ]
   },
   "devDependencies": {
