@@ -148,3 +148,7 @@ Shell jobs use Pi's native local bash backend for platform shell selection, time
 
 - Logs and temporary session files are isolated by Pi process under `/tmp/pi-bg/<pid>` (`sessions/` for subagent sessions).
 - Temporary storage is operational state, not a permanent archive; the operating system may clear it.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, how to run the type check, and how to submit a pull request.
