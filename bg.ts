@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,6 +21,22 @@ interface BgJob {
   kind: "shell" | "subagent";
   state: "queued" | "running";
   session?: AgentSession;
+  logFile?: string;
+  model?: string;
+}
+
+interface FinishedJob {
+  pid: number;
+  command: string;
+  startedAt: number;
+  finishedAt: number;
+  sessionId?: string;
+  kind: BgJob["kind"];
+  state: "finished" | "failed" | "stopped" | "timed-out";
+  model?: string;
+  usage?: string;
+  output?: string;
+  logFile?: string;
 }
 
 export function formatStatus(running: number, pending: number) {
@@ -45,6 +61,7 @@ export default function (pi: ExtensionAPI) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
   let activeSubagents = 0;
   const subagentQueue: Array<() => void> = [];
+  const history: FinishedJob[] = [];
 
   const renderMessage = (content: string, theme: Theme, padding: number, expanded: boolean) => {
     const lines = content.split("\n");
@@ -100,6 +117,24 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  function remember(job: BgJob, state: FinishedJob["state"], details: Partial<FinishedJob> = {}) {
+    history.unshift({ pid: job.pid, command: job.command, startedAt: job.startedAt, finishedAt: Date.now(), sessionId: job.sessionId, kind: job.kind, model: job.model, state, ...details });
+    history.length = Math.min(history.length, 20);
+  }
+
+  function describeFinished(job: FinishedJob) {
+    return `${job.pid} ${job.state} ${job.command} (${Math.round((job.finishedAt - job.startedAt) / 1000)}s)${job.usage ? ` · ${job.usage}` : ""}`;
+  }
+
+  function tailFile(path: string, maxBytes = 50_000) {
+    const size = statSync(path).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(path, "r");
+    try { readSync(fd, buffer, 0, length, size - length); } finally { closeSync(fd); }
+    return `${size > length ? "… output truncated …\n" : ""}${buffer.toString("utf8")}`.trim();
+  }
+
   function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext) {
     const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
@@ -132,17 +167,19 @@ export default function (pi: ExtensionAPI) {
       }
     }, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
-    if (pid) jobs.set(pid, { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell", state: "running" });
+    if (pid) jobs.set(pid, { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell", state: "running", logFile });
     syncStatus(ctx);
 
     let spawnError: string | undefined;
     proc.once("error", (error) => { spawnError = error.message; });
     proc.once("close", (code) => {
       clearTimeout(timer);
+      const job = pid && jobs.get(pid);
       if (pid) jobs.delete(pid);
       const content = readFileSync(logFile, "utf8").trim();
       const truncated = truncateTail(content);
       const keepLog = code !== 0 || Boolean(spawnError) || truncated.truncated;
+      const state: FinishedJob["state"] = timedOut ? "timed-out" : cancelled ? "stopped" : spawnError || code !== 0 ? "failed" : "finished";
       const heading = timedOut
         ? `Background task timed out after ${timeoutSec} seconds`
         : cancelled ? "Background task was stopped"
@@ -152,6 +189,7 @@ export default function (pi: ExtensionAPI) {
       const result = content ? `\n\nResult:\n${truncated.content}${truncated.truncated ? `\n\nThe result was shortened. Full result: ${logFile}` : ""}` : "";
       const reason = spawnError ? `\n\nReason: ${spawnError}` : code ? `\n\nExit code: ${code}` : "";
       pi.appendEntry("pi-bg-result", { content: `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}` });
+      if (job) remember(job, state, { output: truncated.content, logFile: keepLog ? logFile : undefined });
       if (!keepLog) unlinkSync(logFile);
       syncStatus(ctx);
     });
@@ -216,15 +254,18 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("bg", {
     description: "List and manage background jobs",
     getArgumentCompletions: (prefix) => {
-      const items = Array.from(jobs.values(), (job) => ({
-        value: `kill ${job.pid}`,
-        label: `kill ${job.pid}`,
-        description: job.command,
-      })).filter((item) => item.value.startsWith(prefix));
+      const items = [
+        { value: "history", label: "history", description: "Show recent completed jobs" },
+        ...Array.from(jobs.values(), (job) => ({ value: `kill ${job.pid}`, label: `kill ${job.pid}`, description: job.command })),
+      ].filter((item) => item.value.startsWith(prefix));
       return items.length ? items : null;
     },
     handler: async (args, ctx) => {
       const trimmed = args?.trim() ?? "";
+      if (trimmed === "history") {
+        ctx.ui.notify(history.length ? history.map(describeFinished).join("\n") : "No completed background jobs", "info");
+        return;
+      }
       const killMatch = trimmed.match(/^(?:kill\s+)?(-?\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);
@@ -248,19 +289,41 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg",
     label: "Background",
-    description: "Run long-running shell commands in the background without blocking the agent session.",
-    promptSnippet: "Run long-running shell commands in the background without blocking the agent session.",
+    description: "Run, inspect, or stop long-running shell commands without blocking the agent session.",
+    promptSnippet: "Run, inspect, or stop long-running shell commands without blocking the agent session."},{
     promptGuidelines: [
       "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
       "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
       "After starting bg, continue work immediately; never wait, sleep, or poll for completion.",
     ],
     parameters: Type.Object({
-      command: Type.String({ description: "Shell command" }),
+      action: Type.Optional(StringEnum(["spawn", "status", "output", "stop"] as const, { description: "Action (default: spawn)" })),
+      command: Type.Optional(Type.String({ description: "Shell command for spawn" })),
+      pid: Type.Optional(Type.Number({ description: "Job PID for output or stop" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
-    async execute(id, { command, timeoutSec = 600 }, _sig, _up, ctx) {
-      return runBgProcess(command, timeoutSec, ctx);
+    async execute(id, { action = "spawn", command, pid, timeoutSec = 600 }, _sig, _up, ctx) {
+      const shellJobs = () => Array.from(jobs.values()).filter((job) => job.kind === "shell");
+      if (action === "status") {
+        const listed = shellJobs();
+        const recent = history.filter((job) => job.kind === "shell");
+        const text = [...listed.map((job) => `${job.pid} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`), ...recent.map(describeFinished)];
+        return { content: [{ type: "text" as const, text: text.join("\n") || "No shell jobs." }], details: { jobs: listed.map(({ controller, ...job }) => job), history: recent } };
+      }
+      const job = pid && jobs.get(pid);
+      if (action === "stop") {
+        if (!job || job.kind !== "shell") throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
+        job.controller.abort();
+        return { content: [{ type: "text" as const, text: `Stopped shell job ${pid}` }], details: { pid } };
+      }
+      if (action === "output") {
+        const done = history.find((item) => item.pid === pid && item.kind === "shell");
+        if ((!job?.logFile || job.kind !== "shell") && !done) throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
+        const text = job?.logFile ? tailFile(job.logFile) : done?.output || "No output.";
+        return { content: [{ type: "text" as const, text }], details: { pid, logFile: job?.logFile ?? done?.logFile, state: done?.state } };
+      }
+      if (!command?.trim()) throw new Error("command is required for spawn");
+      return runBgProcess(command.trim(), timeoutSec, ctx);
     },
   });
 
@@ -274,7 +337,8 @@ export default function (pi: ExtensionAPI) {
       "Provide complete and self-contained instructions in prompt so the subagent has full context to complete the task.",
       "Reuse sessionId from an earlier subagent result to continue conversation state with that subagent.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
-      "For independent tasks, call subagent multiple times in one turn; Pi runs sibling tool calls in parallel.",
+      "For independent read-only tasks, call subagent multiple times in one turn; Pi runs sibling tool calls in parallel.",
+      "Run only one writing subagent at a time unless the work is externally isolated; subagents share the same working directory.",
     ],
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["spawn", "status", "steer", "stop"] as const, { description: "Action (default: spawn)" })),
@@ -294,7 +358,9 @@ export default function (pi: ExtensionAPI) {
       const matching = requestedId && Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId);
       if (action === "status") {
         const listed = Array.from(jobs.values()).filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
-        return { content: [{ type: "text" as const, text: listed.length ? listed.map((job) => `${job.sessionId} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`).join("\n") : "No matching subagents." }], details: { jobs: listed.map(({ controller, session, ...job }) => job) } };
+        const recent = history.filter((job) => job.kind === "subagent" && (!requestedId || job.sessionId === requestedId));
+        const text = [...listed.map((job) => `${job.sessionId} ${job.state} ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`), ...recent.map(describeFinished)];
+        return { content: [{ type: "text" as const, text: text.join("\n") || "No matching subagents." }], details: { jobs: listed.map(({ controller, session, ...job }) => job), history: recent } };
       }
       if (action === "stop") {
         if (!matching) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
@@ -354,7 +420,8 @@ export default function (pi: ExtensionAPI) {
         void session.abort();
       }, { once: true });
       const label = description?.trim() || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
-      const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session };
+      const displayModel = modelSpec ?? "Pi default";
+      const job: BgJob = { pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId, controller, kind: "subagent", state: "queued", session, model: displayModel };
       jobs.set(pid, job);
 
       const start = () => {
@@ -368,20 +435,29 @@ export default function (pi: ExtensionAPI) {
         job.state = "running";
         syncStatus(ctx);
         const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
+        let finalState: FinishedJob["state"] = "finished";
+        let finalOutput = "";
+        let finalUsage = "";
         void session.prompt(prompt).then(() => {
           const message = [...session.messages].reverse().find((item: any) => item.role === "assistant") as any;
           const rawText = message?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n").trim();
           const text = rawText && truncateTail(rawText).content;
           const error = message?.errorMessage;
           const usage = message?.usage;
+          finalOutput = text || "";
+          finalUsage = usage ? `↑${usage.input} ↓${usage.output}${usage.cost?.total ? ` $${usage.cost.total.toFixed(4)}` : ""}` : "";
+          finalState = timedOut ? "timed-out" : cancelled ? "stopped" : error ? "failed" : "finished";
           const usageText = usage ? `\n\nSubagent Usage: ↑${usage.input} ↓${usage.output}${usage.cacheRead ? ` R${usage.cacheRead}` : ""}${usage.cacheWrite ? ` W${usage.cacheWrite}` : ""}${usage.cost?.total ? ` ($${usage.cost.total.toFixed(4)})` : ""}` : "";
           deliverCompletion(`${getSubagentHeading(error, timedOut, cancelled)}\nTask: Subagent: ${label}${text ? `\n\nResult:\n${text}` : ""}${error ? `\n\nReason: ${error}` : ""}${usageText}`, ctx, completion);
         }).catch((error) => {
+          finalState = timedOut ? "timed-out" : cancelled ? "stopped" : "failed";
+          finalOutput = String(error);
           deliverCompletion(`${getSubagentHeading(String(error), timedOut, cancelled)}\nTask: Subagent: ${label}\n\nReason: ${error}`, ctx, completion);
         }).finally(() => {
           clearTimeout(timer);
           activeSubagents--;
           jobs.delete(pid);
+          remember(job, finalState, { output: finalOutput, usage: finalUsage });
           session.dispose();
           syncStatus(ctx);
           subagentQueue.shift()?.();
@@ -389,7 +465,6 @@ export default function (pi: ExtensionAPI) {
       };
       if (activeSubagents < 4) start(); else { subagentQueue.push(start); syncStatus(ctx); }
 
-      const displayModel = modelSpec ?? "Pi default";
       return {
         content: [{ type: "text", text: `${job.state === "running" ? "Started" : "Queued"}: Subagent: ${label}\nThe result will arrive automatically. Continue other work; do not wait, sleep, or poll. Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}` }],
         details: { pid, sessionId: session.sessionId, model: displayModel, state: job.state },

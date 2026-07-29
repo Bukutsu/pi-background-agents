@@ -20,7 +20,7 @@ pi install git:github.com/Bukutsu/pi-bg
 - **Bounded parallelism**: Run four subagents concurrently and queue excess work automatically.
 - **Configurable completion behavior**: Queue subagent results for the user's next prompt or wake the parent agent immediately upon completion.
 - **Native result cards**: Render themed status, usage, and Markdown output with expandable long results.
-- **Interactive task management**: View running jobs and terminate processes using the `/bg` command.
+- **Interactive task management**: View running jobs, inspect the latest 20 completed jobs, and terminate processes using `/bg`.
 
 ## Tools
 
@@ -32,7 +32,9 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 
 | Parameter | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `command` | `string` | Yes | — | Shell command to execute. |
+| `action` | `string` | No | `"spawn"` | `"spawn"`, `"status"`, `"output"`, or `"stop"`. |
+| `command` | `string` | For spawn | — | Shell command to execute. |
+| `pid` | `number` | For output/stop | — | Running shell job PID. |
 | `timeoutSec` | `number` | No | `600` | Timeout in seconds (min: `1`, max: `2147483`). |
 
 #### Behavior & Output
@@ -45,10 +47,10 @@ Runs a shell command in the background using `bash -c`. Output is logged to a te
 #### Example
 
 ```json
-{
-  "command": "npm test",
-  "timeoutSec": 300
-}
+{ "command": "npm run build", "timeoutSec": 300 }
+{ "action": "status" }
+{ "action": "output", "pid": 12345 }
+{ "action": "stop", "pid": 12345 }
 ```
 
 ---
@@ -85,7 +87,8 @@ Runs an isolated Pi SDK session in the background. It can also inspect, steer, o
 - **Completion modes**:
   - `"queue"`: Delivers subagent results to context. If the parent agent is idle when completed, status displays `bg done` without triggering an agent turn until the user sends a message.
   - `"continue"`: Delivers result and immediately triggers a new agent turn (`triggerTurn: true`) if the parent agent is idle.
-- **Project context**: The SDK session runs in the parent working directory with Pi's normal resource discovery.
+- **Project context**: The SDK session runs in the parent working directory with Pi's normal resource discovery. Concurrent writing subagents can conflict, so parallel calls should normally be read-only unless work is isolated externally.
+- **Recent history**: Status actions include up to 20 completed jobs with state, duration, model/session metadata, and usage when available. History resets when Pi reloads.
 - **System prompt**: `systemPrompt` is appended through Pi's `DefaultResourceLoader`; no temporary prompt file is created.
 
 #### Examples
@@ -134,6 +137,7 @@ The `/bg` command manages running background processes.
 
 - `/bg`: Displays an interactive selection menu in TUI mode to stop a running background job. Displays job ID, command summary, session ID (if applicable), and elapsed runtime. If no jobs are active, displays a notification.
 - `/bg <id>` or `/bg kill <id>`: Stops the job with the given ID.
+- `/bg history`: Shows the latest 20 completed jobs from the current Pi session.
 
 ## Keyboard Shortcut
 
