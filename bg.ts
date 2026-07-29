@@ -1,6 +1,5 @@
 import { createAgentSession, createLocalBashOperations, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
@@ -29,29 +28,6 @@ function getSubagentHeading(error?: string, timedOut = false, cancelled = false)
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerMessageRenderer("pi-bg-result", (message, options, theme) => {
-    const content = typeof message.content === "string" ? message.content : "";
-    const lines = content.split("\n");
-    const firstLine = lines[0] || "";
-    const rest = lines.slice(1).join("\n");
-
-    let statusHeader = "";
-    if (firstLine.includes("finished")) {
-      statusHeader = theme.fg("success", firstLine);
-    } else if (firstLine.includes("failed")) {
-      statusHeader = theme.fg("error", firstLine);
-    } else if (firstLine.includes("timed out")) {
-      statusHeader = theme.fg("warning", firstLine);
-    } else if (firstLine.includes("stopped")) {
-      statusHeader = theme.fg("dim", firstLine);
-    } else {
-      statusHeader = theme.fg("accent", firstLine);
-    }
-
-    const renderedText = rest ? `${statusHeader}\n${rest}` : statusHeader;
-    return new Text(renderedText, options.outputPad, 0);
-  });
-
   const jobs = new Map<number, BgJob>();
   let nextVirtualPid = -1;
   let modelRuntime: Promise<ModelRuntime> | undefined;
