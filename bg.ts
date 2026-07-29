@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 
 let logDir: string | undefined;
 const getLogDir = () => logDir ??= mkdtempSync(join(tmpdir(), "pi-background-agents-"));
@@ -50,7 +50,6 @@ interface BgJob {
   kind: "shell" | "subagent";
   session?: AgentSession;
   activity?: string;
-  badge?: string;
   baseline?: SessionStats;
   record?: SubagentRecord;
   toolFailures?: number;
@@ -167,7 +166,9 @@ function acquireSessionLock(sessionId: string) {
         renameSync(lock, stale);
         rmSync(stale, { recursive: true, force: true });
       } catch (staleError: any) {
-        if (staleError?.code !== "ENOENT") throw staleError;
+        if (staleError?.code === "ENOENT") {
+          try { rmSync(lock, { recursive: true, force: true }); } catch {}
+        } else throw staleError;
       }
     }
   }
@@ -234,7 +235,7 @@ export default function (pi: ExtensionAPI) {
             const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
             const icon = theme.fg("accent", frame);
             const progress = job.activity ? `, ${job.activity}` : "";
-            const badgeText = job.session?.model ? `${job.session.model.id}:${job.session.thinkingLevel}` : job.badge;
+            const badgeText = job.session?.model ? `${job.session.model.id}:${job.session.thinkingLevel}` : undefined;
             const queueTag = job.completion === "queue" ? " Q" : "";
             const badge = badgeText ? ` [${badgeText}${queueTag}]` : queueTag ? ` [${queueTag.trim()}]` : "";
             const content = ` ${icon} ${job.command}${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
@@ -250,7 +251,7 @@ export default function (pi: ExtensionAPI) {
           }
 
           const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-          return [truncateToWidth(top, width), ...jobLines, truncateToWidth(bottom, width)];
+          return [top, ...jobLines, bottom];
         },
         invalidate() {},
       };
@@ -293,7 +294,7 @@ export default function (pi: ExtensionAPI) {
     const root = realpathSync(parent);
     const target = realpathSync(resolve(root, requested?.trim() || "."));
     const rel = relative(root, target);
-    if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) {
+    if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
       throw new Error(`cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`);
     }
     if (!statSync(target).isDirectory()) throw new Error(`cwd is not a directory: ${target}`);
@@ -444,7 +445,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       action: Type.Optional(StringEnum(["spawn", "status", "stop"] as const, { description: "Action (default: spawn)" })),
       command: Type.Optional(Type.String({ description: "Shell command for spawn" })),
-      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next prompt" })),
+      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next message" })),
       pid: Type.Optional(Type.Number({ description: "Job ID for stop" })),
       timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
     }),
@@ -510,8 +511,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Delegate complex, isolated, or deep exploration tasks to a background subagent.",
-    promptSnippet: "Delegate complex, isolated, or deep exploration tasks to a background subagent.",
+    description: "Delegate exploration or research tasks to a background subagent.",
+    promptSnippet: "Delegate exploration or research tasks to a background subagent.",
     promptGuidelines: [
       "Use subagent for multi-step sub-tasks, background research, code audits, refactoring, or sub-problems to keep main context uncluttered.",
       "Provide complete and self-contained instructions in prompt; use context:fork only when the child needs the parent's current conversation.",
@@ -527,7 +528,7 @@ export default function (pi: ExtensionAPI) {
       description: Type.Optional(Type.String({ description: "Short job label" })),
       sessionId: Type.Optional(Type.String({ description: "Durable session identity to resume, inspect, steer, or stop" })),
       message: Type.Optional(Type.String({ description: "Message queued after the running child's current turn" })),
-      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next prompt" })),
+      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next message" })),
       model: Type.Optional(Type.String({ description: "Preferred model; omitted on resume to restore the saved model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level; omitted on resume to restore the saved level" })),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist; can only narrow the parent's active tools" })),
@@ -630,7 +631,7 @@ export default function (pi: ExtensionAPI) {
         if (runtimeKey) runtime.setRuntimeApiKey(selectedModel.provider, runtimeKey);
       }
       let sessionLock = existing ? acquireSessionLock(existing.sessionId) : undefined;
-      let created: Awaited<ReturnType<typeof createAgentSession>>;
+      let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
       try {
         created = await createAgentSession({
           cwd: childCwd,
@@ -644,10 +645,11 @@ export default function (pi: ExtensionAPI) {
         checkSetup();
         sessionLock ??= acquireSessionLock(created.session.sessionId);
       } catch (error) {
+        if (created) await created.session.dispose();
         if (sessionLock) rmSync(sessionLock, { recursive: true, force: true });
         throw error;
       }
-      const { session, modelFallbackMessage, extensionsResult } = created;
+      const { session, modelFallbackMessage, extensionsResult } = created!;
       const controller = new AbortController();
       let extensionsBound = false;
       let disposed = false;
@@ -733,7 +735,7 @@ export default function (pi: ExtensionAPI) {
       };
       const job: BgJob = {
         pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId,
-        controller, kind: "subagent", session, activity: "starting", badge: `${session.model.id}:${session.thinkingLevel}`, completion,
+        controller, kind: "subagent", session, activity: "starting", completion,
         baseline: session.getSessionStats(), record, toolFailures: 0, activeTools: new Map(), sessionLock,
       };
       try {

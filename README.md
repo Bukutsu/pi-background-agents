@@ -44,7 +44,7 @@ Use `subagent` for work that benefits from a separate context, model, or working
 }
 ```
 
-The call returns immediately. Pi receives the child's final response when it finishes. `completion: "queue"` uses Pi's in-memory next-turn queue, so exit or reload before the next prompt discards that queued delivery; the child session and status record remain durable.
+The call returns immediately. Pi receives the child's final response when it finishes. `completion: "queue"` uses Pi's in-memory next-turn queue, so exit or reload before the next message discards that queued delivery; the child session and status record remain durable.
 
 Parameters:
 
@@ -52,11 +52,11 @@ Parameters:
 | --- | --- | --- |
 | `action` | `"spawn"` | `spawn`, `status`, `steer`, or `stop` |
 | `prompt` | | Task for a new or resumed session |
-| `description` | Prompt prefix | Short label shown in status |
+| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status |
 | `sessionId` | New ID | Resume, inspect, steer, or stop a child |
 | `message` | | Guidance queued after the child's current turn |
 | `completion` | `"continue"` | `continue` wakes Pi when done; `queue` waits for the next user turn |
-| `model` | Parent or saved model | Model ID or provider/model specifier |
+| `model` | Parent or saved model | Model ID or provider/model specifier; an unresolvable model falls back to a default and emits a `Model fallback: …` notice |
 | `thinking` | Parent or saved level | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `tools` | Parent tools | Comma-separated allowlist that can only reduce access |
 | `cwd` | Parent directory | Existing directory inside the parent project |
