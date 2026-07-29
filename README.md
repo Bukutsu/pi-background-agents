@@ -19,6 +19,7 @@ pi install git:github.com/Bukutsu/pi-bg
 - **Session persistence and control**: Resume, inspect, steer, or stop subagents using session IDs.
 - **Bounded parallelism**: Run four subagents concurrently and queue excess work automatically.
 - **Configurable completion behavior**: Queue subagent results for the user's next prompt or wake the parent agent immediately upon completion.
+- **Native result cards**: Render themed status, usage, and Markdown output with expandable long results.
 - **Interactive task management**: View running jobs and terminate processes using the `/bg` command.
 
 ## Tools

@@ -1,9 +1,9 @@
-import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, getMarkdownTheme, keyHint, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,23 +46,33 @@ export default function (pi: ExtensionAPI) {
   let activeSubagents = 0;
   const subagentQueue: Array<() => void> = [];
 
-  const renderMessage = (content: string, theme: Theme, padding: number) => {
-    const newline = content.indexOf("\n");
-    const heading = newline < 0 ? content : content.slice(0, newline);
-    const rest = newline < 0 ? "" : content.slice(newline);
-    const styledHeading = heading.includes("finished")
-      ? theme.fg("success", heading)
-      : heading.includes("failed") || heading.includes("could not")
-      ? theme.fg("error", heading)
-      : theme.fg("warning", heading);
-    return new Text(styledHeading + theme.fg("customMessageText", rest), padding, 0);
+  const renderMessage = (content: string, theme: Theme, padding: number, expanded: boolean) => {
+    const lines = content.split("\n");
+    const heading = lines.shift() ?? "Background task";
+    const taskIndex = lines.findIndex((line) => line.startsWith("Task: "));
+    const task = taskIndex >= 0 ? lines.splice(taskIndex, 1)[0].replace(/^Task: (?:Subagent: )?/, "") : "Background task";
+    const usageIndex = lines.findIndex((line) => line.startsWith("Subagent Usage: "));
+    const usage = usageIndex >= 0 ? lines.splice(usageIndex, 1)[0].replace("Subagent Usage: ", "") : "";
+    const success = heading.includes("finished");
+    const failed = heading.includes("failed") || heading.includes("could not");
+    const color = success ? "success" : failed ? "error" : "warning";
+    const icon = success ? "✓" : failed ? "✗" : "■";
+    const body = lines.join("\n").trim().replace(/^Result:\n/, "");
+    const shown = expanded ? body : body.split("\n").slice(0, 12).join("\n");
+
+    const box = new Box(padding, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(`${theme.fg(color, icon)} ${theme.bold(task)}`, 0, 0));
+    box.addChild(new Text(theme.fg("dim", `${heading.replace(/^Background (?:subagent |task )?/, "")}${usage ? ` · ${usage}` : ""}`), 0, 0));
+    if (shown) box.addChild(new Markdown(shown, 0, 1, getMarkdownTheme()));
+    if (!expanded && shown !== body) box.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to expand")), 0, 0));
+    return box;
   };
 
-  pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry, _options, theme) =>
-    renderMessage(entry.data.content, theme, 1)
+  pi.registerEntryRenderer<{ content: string }>("pi-bg-result", (entry, { expanded }, theme) =>
+    renderMessage(entry.data.content, theme, 1, expanded)
   );
-  pi.registerMessageRenderer("pi-bg-result", (message, { outputPad }, theme) =>
-    renderMessage(message.content, theme, outputPad)
+  pi.registerMessageRenderer("pi-bg-result", (message, { expanded, outputPad }, theme) =>
+    renderMessage(typeof message.content === "string" ? message.content : "", theme, outputPad, expanded)
   );
 
   // Remove tool_call sleep blocker - triggerTurn: true handles turn wake-up cleanly
