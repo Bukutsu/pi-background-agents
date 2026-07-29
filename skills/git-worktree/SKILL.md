@@ -1,56 +1,76 @@
 ---
 name: git-worktree
-description: Workflow and instructions for creating, using, managing, and merging Git worktrees for parallel agent development. Use when isolated branching, concurrent feature editing, or clean multitasking in Git is needed.
+description: Use when spawning multiple writing subagents that will edit files in parallel. Instructs the agent to automatically create an isolated Git worktree per subagent, pass it as cwd, and clean up after merging. Non-SWE users benefit most since parallel edits without worktrees will silently conflict.
 ---
 
-# Git Worktree Workflow
+# Git Worktree Skill
 
-Use Git worktrees to isolate parallel subagent tasks or concurrent code changes without dirtying the main working tree.
+Use this skill whenever you plan to run two or more subagents that will edit, write, or refactor files at the same time.
 
-## When to Use Worktrees
+Without isolated worktrees, parallel writing subagents share the same checkout and will overwrite each other's changes.
 
-- Running writing subagents in parallel on separate features.
-- Testing experimental refactors without stashing or switching branches.
-- Reviewing or building multiple features concurrently.
+## When This Applies
 
-## Standard Workflow
+- Spawning two or more subagents with write/edit/bash tools.
+- Running parallel feature work, refactors, or fixes simultaneously.
 
-### 1. Create a Worktree
+## Workflow
 
-Create an isolated branch and directory for the task:
+### 1. Create a Worktree Per Subagent
+
+Before spawning each writing subagent, create an isolated branch and checkout:
 
 ```bash
-git worktree add -b feature-task /tmp/worktrees/feature-task main
+git worktree add -b <branch-name> /tmp/worktrees/<branch-name> main
 ```
 
-### 2. Perform Work in the Worktree
-
-Run subagents or commands inside the worktree path `/tmp/worktrees/feature-task`.
-
-### 3. Merge Changes Back
-
-Once verified, commit changes in the worktree and merge into main:
+Example for two subagents:
 
 ```bash
-git checkout main
-git merge feature-task --no-ff -m "feat: merge feature-task"
+git worktree add -b task-auth /tmp/worktrees/task-auth main
+git worktree add -b task-tests /tmp/worktrees/task-tests main
+```
+
+### 2. Spawn Each Subagent With Its Own cwd
+
+Pass the worktree path as `cwd` when calling the subagent tool:
+
+```
+subagent(
+  description: "Implement auth",
+  cwd: "/tmp/worktrees/task-auth",
+  prompt: "..."
+)
+
+subagent(
+  description: "Write tests",
+  cwd: "/tmp/worktrees/task-tests",
+  prompt: "..."
+)
+```
+
+### 3. Review and Merge
+
+After subagents finish, inspect each branch and merge back:
+
+```bash
+git -C /tmp/worktrees/task-auth log --oneline -5
+git checkout main && git merge task-auth --no-ff -m "feat: merge task-auth"
+git merge task-tests --no-ff -m "feat: merge task-tests"
 ```
 
 ### 4. Clean Up
 
-Remove the worktree checkout and delete the branch:
-
 ```bash
-git worktree remove --force /tmp/worktrees/feature-task
-git branch -d feature-task
+git worktree remove /tmp/worktrees/task-auth
+git worktree remove /tmp/worktrees/task-tests
+git branch -d task-auth task-tests
 git worktree prune
 ```
 
-## Quick Commands Reference
+## Rules
 
-| Action | Command |
-| --- | --- |
-| **List worktrees** | `git worktree list` |
-| **Add worktree** | `git worktree add -b <branch> <path> [<base-branch>]` |
-| **Remove worktree** | `git worktree remove <path>` |
-| **Prune stale entries** | `git worktree prune` |
+- One worktree per writing subagent. Never share a worktree between two subagents.
+- Read-only subagents (read, bash, grep) do not need worktrees. Run them directly in the main cwd.
+- Always clean up worktrees after merging to avoid stale checkouts.
+- If a merge has conflicts, resolve them in the main checkout before removing the worktree.
