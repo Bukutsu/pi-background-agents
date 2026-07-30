@@ -1295,20 +1295,49 @@ export default function (pi: ExtensionAPI) {
       modelRuntime ??= ModelRuntime.create();
       const runtime = await modelRuntime;
       checkSetup();
+      // Forward all providers from parent context to child runtime
+      // This includes providers registered by packages (e.g., pi-antigravity)
+      const forwardedProviders = new Set<string>();
+
+      // First: register all providers from the registry
       for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
+        if (forwardedProviders.has(providerId)) continue;
+        // Prefer native provider, then config, then composed provider
         const native =
-          ctx.modelRegistry.getRegisteredNativeProvider(providerId) ??
-          ctx.modelRegistry.getProvider(providerId);
+          ctx.modelRegistry.getRegisteredNativeProvider(providerId);
         const config =
           ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-        if (native) runtime.registerNativeProvider(native);
-        else if (config) runtime.registerProvider(providerId, config);
+        if (native) {
+          runtime.registerNativeProvider(native);
+          forwardedProviders.add(providerId);
+        } else if (config) {
+          runtime.registerProvider(providerId, config);
+          forwardedProviders.add(providerId);
+        } else {
+          // Fallback: use the composed provider object
+          const provider = ctx.modelRegistry.getProvider(providerId);
+          if (provider) {
+            runtime.registerNativeProvider(provider);
+            forwardedProviders.add(providerId);
+          }
+        }
       }
-      for (const m of ctx.modelRegistry.getAll()) {
-        if (!runtime.getProvider(m.provider)) {
-          const providerObj = ctx.modelRegistry.getProvider(m.provider);
-          if (providerObj) {
-            runtime.registerNativeProvider(providerObj);
+
+      // Second: ensure all providers referenced by models are registered
+      // This catches extension-registered providers that may not appear in getRegisteredProviderIds()
+      for (const model of ctx.modelRegistry.getAll()) {
+        if (forwardedProviders.has(model.provider)) continue;
+        const config = ctx.modelRegistry.getRegisteredProviderConfig(
+          model.provider,
+        );
+        if (config) {
+          runtime.registerProvider(model.provider, config);
+          forwardedProviders.add(model.provider);
+        } else {
+          const provider = ctx.modelRegistry.getProvider(model.provider);
+          if (provider) {
+            runtime.registerNativeProvider(provider);
+            forwardedProviders.add(model.provider);
           }
         }
       }
@@ -1402,14 +1431,7 @@ export default function (pi: ExtensionAPI) {
             scopedList?.[0]?.model)
           : undefined;
       const selectedModel = resolvedModel ?? scopedModel;
-      if (selectedModel) {
-        const runtimeKey = await ctx.modelRegistry.getApiKeyForProvider(
-          selectedModel.provider,
-        );
-        checkSetup();
-        if (runtimeKey)
-          runtime.setRuntimeApiKey(selectedModel.provider, runtimeKey);
-      }
+      checkSetup();
       let sessionLock = existing
         ? acquireSessionLock(existing.sessionId)
         : undefined;
