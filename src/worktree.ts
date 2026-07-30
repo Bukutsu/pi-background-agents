@@ -13,15 +13,28 @@ export async function removeWorktree(
   path: string,
   branch?: string,
 ): Promise<void> {
+  // Resolve the git repo root so we run git commands from the right place,
+  // even if callers pass ctx.cwd instead of the repo root.
+  let root = cwd;
   try {
-    await pi.exec("git", ["worktree", "remove", "--force", path], { cwd });
+    const res = await pi.exec("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+    });
+    if (res.code === 0) root = res.stdout.trim();
+  } catch {}
+  let removed = false;
+  try {
+    const res = await pi.exec("git", ["worktree", "remove", "--force", path], {
+      cwd: root,
+    });
+    removed = res.code === 0;
   } catch {}
   try {
     rmSync(path, { recursive: true, force: true });
   } catch {}
-  if (branch) {
+  if (branch && removed) {
     try {
-      await pi.exec("git", ["branch", "-D", branch], { cwd });
+      await pi.exec("git", ["branch", "-D", branch], { cwd: root });
     } catch {}
   }
 }

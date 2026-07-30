@@ -18,6 +18,7 @@ import { getLogDir } from "./types.js";
 import { renderToolResult } from "./utils.js";
 
 export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
+  const MAX_CMD_LEN = 120;
   function runBgProcess(
     command: string,
     timeoutSec: number,
@@ -26,7 +27,9 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   ) {
     const expectedGeneration = manager.generation;
     const shownCommand =
-      command.length > 120 ? `${command.slice(0, 117)}...` : command;
+      command.length > MAX_CMD_LEN
+        ? `${command.slice(0, MAX_CMD_LEN - 3)}...`
+        : command;
     const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
     let output = "";

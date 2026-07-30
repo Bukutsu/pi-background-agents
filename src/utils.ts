@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
@@ -365,6 +365,9 @@ export function resolveSubagentCwd(parent: string, requested?: string) {
   } catch {}
   const relRoot = relative(root, target);
   const relParent = relative(parent, target);
+  // ponytail: test both realpath(root) and raw parent so a symlink inside the
+  // project doesn't falsely reject the target; AND rejects only when both paths
+  // agree the target escapes, preventing symlink-based traversal.
   const isTraversal =
     relRoot === ".." ||
     relRoot.startsWith(".." + "/") ||

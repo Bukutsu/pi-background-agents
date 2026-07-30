@@ -145,7 +145,7 @@ export class JobManager {
       let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<void>((resolve) => {
         shutdownTimeout = setTimeout(resolve, 10000);
-        shutdownTimeout.unref?.();
+        shutdownTimeout.unref();
       });
       try {
         await Promise.race([

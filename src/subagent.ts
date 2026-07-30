@@ -370,10 +370,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         modelRuntime ??= ModelRuntime.create();
         const runtime = await modelRuntime;
         checkSetup();
-        const forwardedProviders = new Set<string>();
-
         for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-          if (forwardedProviders.has(providerId)) continue;
           try {
             const native =
               ctx.modelRegistry.getRegisteredNativeProvider(providerId);
@@ -381,15 +378,12 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               ctx.modelRegistry.getRegisteredProviderConfig(providerId);
             if (native) {
               runtime.registerNativeProvider(native);
-              forwardedProviders.add(providerId);
             } else if (config) {
               runtime.registerProvider(providerId, config);
-              forwardedProviders.add(providerId);
             } else {
               const provider = ctx.modelRegistry.getProvider(providerId);
               if (provider) {
                 runtime.registerNativeProvider(provider);
-                forwardedProviders.add(providerId);
               }
             }
           } catch (providerError) {
@@ -402,7 +396,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
         const modelSpec = model?.trim();
         let resolvedModel: Model<any> | undefined;
-        let resolvedThinking: any;
+        let resolvedThinking: string | undefined;
 
         const scopedList = getScopedModels(ctx);
         if (modelSpec) {
@@ -424,7 +418,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
             if (matched) {
               resolvedModel = matched.model;
-              resolvedThinking = (thinking ?? matched.thinkingLevel) as any;
+              resolvedThinking = thinking ?? matched.thinkingLevel;
             } else {
               const availableNames = scopedList
                 .map((s) => `${s.model.provider}/${s.model.id}`)
@@ -442,7 +436,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             if (resolved.error) throw new Error(resolved.error);
             if (resolved.warning) console.warn(resolved.warning);
             resolvedModel = resolved.model;
-            resolvedThinking = (thinking ?? resolved.thinkingLevel) as any;
+            resolvedThinking = thinking ?? resolved.thinkingLevel;
           }
         }
 
@@ -498,7 +492,18 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         checkSetup();
         const targetSessionId =
           existing?.sessionId ?? sessionManager.getSessionId();
-        sessionLock = acquireSessionLock(targetSessionId);
+        let sessionLock: string;
+        try {
+          sessionLock = acquireSessionLock(targetSessionId);
+        } catch (lockError) {
+          // Clean up orphaned session file if we created one before lock acquisition
+          if (!existing) {
+            try {
+              rmSync(sessionManager.getSessionFile() ?? "", { force: true });
+            } catch {}
+          }
+          throw lockError;
+        }
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
         try {
           created = await createAgentSession({
