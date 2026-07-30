@@ -410,7 +410,17 @@ export default function (pi: ExtensionAPI) {
                 : queueTag
                   ? ` [${queueTag.trim()}]`
                   : "";
-              const content = ` ${icon} ${job.command}${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
+              const prefix = ` ${icon} `;
+              const meta = `${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
+              const availForCmd = Math.max(
+                0,
+                innerWidth - visibleWidth(prefix) - visibleWidth(meta),
+              );
+              const truncatedCmd =
+                visibleWidth(job.command) > availForCmd
+                  ? truncateToWidth(job.command, availForCmd)
+                  : job.command;
+              const content = `${prefix}${truncatedCmd}${meta}`;
               const fill = " ".repeat(
                 Math.max(0, innerWidth - visibleWidth(content)),
               );
@@ -623,6 +633,21 @@ export default function (pi: ExtensionAPI) {
     syncStatus(ctx);
   });
 
+  pi.on("before_agent_start", async (event, ctx) => {
+    currentCtx = ctx;
+    const scopedList = (ctx as any).scopedModels as
+      | Array<{ model: any }>
+      | undefined;
+    if (scopedList && scopedList.length > 0) {
+      const modelsList = scopedList
+        .map((s) => `\`${s.model.provider}/${s.model.id}\``)
+        .join(", ");
+      return {
+        systemPrompt: `${event.systemPrompt}\n\nAvailable scoped subagent models: ${modelsList}`,
+      };
+    }
+  });
+
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
     lifecycle.abort();
@@ -767,11 +792,11 @@ export default function (pi: ExtensionAPI) {
             details: {},
           };
         }
-        const rows = listed.map((job) => {
+        const items = listed.map((job) => {
           const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-          return `| [${job.pid}] | \`${job.command}\` | ${elapsed}s |`;
+          return `● [PID ${job.pid}] \`${job.command}\` (running, ${elapsed}s)`;
         });
-        const text = `| PID | Command | Elapsed |\n|---|---|---|\n${rows.join("\n")}`;
+        const text = items.join("\n");
         return {
           content: [{ type: "text" as const, text }],
           details: {},
@@ -860,44 +885,43 @@ export default function (pi: ExtensionAPI) {
   ) {
     if (sessions.length === 0) return "No matching subagent sessions.";
 
-    const formatState = (state: string) => {
+    const stateIcon = (state: string) => {
       switch (state) {
         case "running":
-          return "running";
+          return "●";
         case "finished":
-          return "finished";
-        case "stopped":
-          return "stopped";
+          return "✓";
         case "failed":
-          return "failed";
         case "timed-out":
-          return "timed out";
         case "interrupted":
-          return "interrupted";
+        case "stopped":
+          return "✖";
         default:
-          return state;
+          return "•";
       }
     };
 
-    const rows = sessions.map((s) => {
+    const cards = sessions.map((s) => {
+      const icon = stateIcon(s.state);
       const duration =
         s.elapsedSec !== undefined
           ? `${s.elapsedSec}s`
           : s.durationSec !== undefined
             ? `${s.durationSec}s`
-            : "-";
-      const costText = s.usage.cost ? `$${s.usage.cost.toFixed(4)}` : "$0.0000";
-      const label =
-        s.label.length > 40 ? `${s.label.slice(0, 37)}...` : s.label;
+            : undefined;
+      const durationStr = duration ? ` | ${duration}` : "";
+      const costText = s.usage.cost ? ` | $${s.usage.cost.toFixed(4)}` : "";
       const shortId = s.sessionId.slice(0, 8);
-      const activityCol =
+      const activityStr =
         s.activity ??
         `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`;
-      return `| ${formatState(s.state)} | ${label} | \`${s.model}:${s.thinking}\` | ${activityCol} | ${duration} | ${costText} | \`${shortId}\` |`;
+
+      return `${icon} ${s.state}  ${s.label}
+  Model: \`${s.model}:${s.thinking}\` | Session: \`${shortId}\`${durationStr}${costText}
+  Activity: ${activityStr}`;
     });
 
-    const header = `| Status | Task | Model | Activity | Duration | Cost | Session ID |\n|---|---|---|---|---|---|---|`;
-    return `${header}\n${rows.join("\n")}`;
+    return cards.join("\n\n");
   }
 
   function statusDetails(record: SubagentRecord, job?: BgJob) {
@@ -1185,11 +1209,20 @@ export default function (pi: ExtensionAPI) {
       checkSetup();
       for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
         const native =
-          ctx.modelRegistry.getRegisteredNativeProvider(providerId);
+          ctx.modelRegistry.getRegisteredNativeProvider(providerId) ??
+          ctx.modelRegistry.getProvider(providerId);
         const config =
           ctx.modelRegistry.getRegisteredProviderConfig(providerId);
         if (native) runtime.registerNativeProvider(native);
         else if (config) runtime.registerProvider(providerId, config);
+      }
+      for (const m of ctx.modelRegistry.getAll()) {
+        if (!runtime.getProvider(m.provider)) {
+          const providerObj = ctx.modelRegistry.getProvider(m.provider);
+          if (providerObj) {
+            runtime.registerNativeProvider(providerObj);
+          }
+        }
       }
       const modelSpec = model?.trim();
       let resolvedModel: any | undefined;
@@ -1273,7 +1306,13 @@ export default function (pi: ExtensionAPI) {
       const requestedThinking = thinking ?? resolvedThinking;
       const scopedModel =
         !resolvedModel && !existing
-          ? ((ctx as any).scopedModels?.[0]?.model ?? ctx.model)
+          ? (scopedList?.find(
+                (s) =>
+                  s.model.id === ctx.model?.id &&
+                  s.model.provider === ctx.model?.provider,
+              )?.model ??
+             ctx.model ??
+             scopedList?.[0]?.model)
           : undefined;
       const selectedModel = resolvedModel ?? scopedModel;
       if (selectedModel) {
