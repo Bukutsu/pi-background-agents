@@ -795,10 +795,16 @@ export default function (pi: ExtensionAPI) {
         killJob(pid);
       }
     }
-    await Promise.race([
-      Promise.allSettled([...pending]),
-      new Promise((resolve) => setTimeout(resolve, 10000)),
-    ]);
+    let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      shutdownTimeout = setTimeout(resolve, 10000);
+      shutdownTimeout.unref?.();
+    });
+    try {
+      await Promise.race([Promise.allSettled([...pending]), timeoutPromise]);
+    } finally {
+      if (shutdownTimeout) clearTimeout(shutdownTimeout);
+    }
     currentCtx = undefined;
   });
 
@@ -1449,9 +1455,14 @@ export default function (pi: ExtensionAPI) {
                 s.model.provider === ctx.model?.provider,
             ) ?? scopedList?.[0])
           : undefined;
-      const selectedModel = resolvedModel ?? scopedEntry?.model ?? ctx.model;
+      const selectedModel =
+        resolvedModel ??
+        (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
       const effectiveThinking =
-        requestedThinking ?? scopedEntry?.thinkingLevel ?? ctx.thinkingLevel;
+        requestedThinking ??
+        (!existing
+          ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
+          : undefined);
       checkSetup();
       const targetSessionId =
         existing?.sessionId ?? sessionManager.getSessionId();
@@ -1484,16 +1495,20 @@ export default function (pi: ExtensionAPI) {
       const disposeChild = async () => {
         if (disposed) return;
         disposed = true;
-        if (extensionsBound) {
-          try {
-            await session.extensionRunner.emit({
-              type: "session_shutdown",
-              reason: "quit",
-            });
-          } catch {}
-        }
-        await session.dispose();
-        if (sessionLock) rmSync(sessionLock, { recursive: true, force: true });
+        try {
+          if (extensionsBound) {
+            try {
+              await session.extensionRunner.emit({
+                type: "session_shutdown",
+                reason: "quit",
+              });
+            } catch {}
+          }
+          await session.dispose();
+        } catch {}
+        try {
+          rmSync(sessionLock, { recursive: true, force: true });
+        } catch {}
       };
       try {
         checkSetup();
