@@ -31,11 +31,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bukutsu/pi-bg.git"
+    "url": "git+https://github.com/Bukutsu/pi-background-agents.git"
   },
-  "homepage": "https://github.com/Bukutsu/pi-bg#readme",
+  "homepage": "https://github.com/Bukutsu/pi-background-agents#readme",
   "bugs": {
-    "url": "https://github.com/Bukutsu/pi-bg/issues"
+    "url": "https://github.com/Bukutsu/pi-background-agents/issues"
   },
   "pi": {
     "extensions": [

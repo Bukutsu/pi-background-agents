@@ -3,8 +3,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/Bukutsu/pi-bg.git
-cd pi-bg
+git clone https://github.com/Bukutsu/pi-background-agents.git
+cd pi-background-agents
 bun install
 ```
 

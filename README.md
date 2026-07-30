@@ -7,7 +7,7 @@ Background shell jobs and SDK-native subagents for [Pi](https://pi.dev).
 ## Install
 
 ```bash
-pi install git:github.com/Bukutsu/pi-bg
+pi install git:github.com/Bukutsu/pi-background-agents
 ```
 
 ## `bg`
