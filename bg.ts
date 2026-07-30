@@ -236,6 +236,10 @@ function sanitizeForkMessages(ctx: ExtensionContext) {
       continue;
     }
     if (message.role === "assistant") {
+      if (typeof message.content === "string") {
+        sanitized.push(message);
+        continue;
+      }
       if (!Array.isArray(message.content)) continue;
       const content = message.content.filter((part) => {
         if (part.type !== "toolCall") return true;
@@ -310,7 +314,7 @@ function acquireSessionLock(sessionId: string) {
       }
       return lock;
     } catch (error: any) {
-      if (error?.code !== "EEXIST") throw error;
+      if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
       try {
         const owner = Number(readFileSync(join(lock, "owner"), "utf8"));
         if (processIsAlive(owner))
@@ -378,7 +382,7 @@ async function loadCustomProviders(pi: ExtensionAPI) {
   }
   const VALID_SPECIFIER = /^[a-z0-9@][a-z0-9@/_.-]*$/i;
   for (const spec of specifiers) {
-    if (!VALID_SPECIFIER.test(spec)) {
+    if (!VALID_SPECIFIER.test(spec) || spec.includes("..")) {
       console.warn(
         `Ignoring invalid custom provider package specifier "${spec}"`,
       );
@@ -1556,7 +1560,7 @@ export default function (pi: ExtensionAPI) {
         "abort",
         () => {
           cancelled = !timedOut;
-          void session.abort();
+          void session.abort().catch(() => {});
         },
         { once: true },
       );
