@@ -38,15 +38,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-} from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 function createMarkdownComponent(text: string, theme: Theme) {
   const mdTheme = {
@@ -105,7 +97,6 @@ const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
 const SUBAGENT_WORKTREES = join(SUBAGENT_DIR, "worktrees");
-const LEGACY_SUBAGENT_INDEX = join(SUBAGENT_DIR, "index.json");
 
 type TerminalState =
   "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
@@ -150,19 +141,6 @@ interface BgJob {
 }
 
 function readIndex(): Record<string, SubagentRecord> {
-  if (existsSync(LEGACY_SUBAGENT_INDEX)) {
-    try {
-      const legacy: Record<string, SubagentRecord> = JSON.parse(
-        readFileSync(LEGACY_SUBAGENT_INDEX, "utf8"),
-      );
-      for (const record of Object.values(legacy)) {
-        if (record?.sessionId) saveRecord(record);
-      }
-      rmSync(LEGACY_SUBAGENT_INDEX, { force: true });
-    } catch (error) {
-      console.warn(`Ignoring invalid legacy subagent index:`, error);
-    }
-  }
   const records: Record<string, SubagentRecord> = {};
   if (!existsSync(SUBAGENT_INDEX)) return records;
   for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
@@ -369,11 +347,7 @@ async function loadCustomProviders(pi: ExtensionAPI) {
   const env = process.env.PI_BG_PROVIDERS?.split(/[,\s]+/).filter(Boolean);
   if (env) for (const spec of env) specifiers.add(spec);
   try {
-    let dir = ".";
-    try {
-      dir = dirname(fileURLToPath(import.meta.url));
-    } catch {}
-    const cfgPath = join(dir, "pi-bg.config.json");
+    const cfgPath = join(process.cwd(), "pi-bg.config.json");
     if (existsSync(cfgPath)) {
       const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
       if (Array.isArray(cfg?.providers))
@@ -402,16 +376,7 @@ async function loadCustomProviders(pi: ExtensionAPI) {
         ) {
           pi.registerProvider(candidate);
         } else {
-          const config = candidate.config ?? candidate.provider ?? candidate;
-          const name = config?.name ?? spec;
-          if (
-            config?.baseUrl ||
-            config?.api ||
-            config?.models ||
-            config?.apiKey ||
-            config?.oauth
-          )
-            pi.registerProvider(name, config);
+          pi.registerProvider(candidate.name ?? spec, candidate);
         }
       }
     } catch (error) {
@@ -419,6 +384,15 @@ async function loadCustomProviders(pi: ExtensionAPI) {
     }
   }
 }
+
+const STATE_ICONS: Record<string, string> = {
+  running: "●",
+  finished: "✓",
+  failed: "✖",
+  "timed-out": "✖",
+  interrupted: "✖",
+  stopped: "✖",
+};
 
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
@@ -1007,15 +981,6 @@ export default function (pi: ExtensionAPI) {
   ) {
     if (sessions.length === 0) return "No matching subagent sessions.";
 
-    const STATE_ICONS: Record<string, string> = {
-      running: "●",
-      finished: "✓",
-      failed: "✖",
-      "timed-out": "✖",
-      interrupted: "✖",
-      stopped: "✖",
-    };
-
     const cards = sessions.map((s) => {
       const icon = STATE_ICONS[s.state] ?? "•";
       const duration =
@@ -1372,24 +1337,6 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Second: ensure all providers referenced by models are registered
-      // This catches extension-registered providers that may not appear in getRegisteredProviderIds()
-      for (const model of ctx.modelRegistry.getAll()) {
-        if (forwardedProviders.has(model.provider)) continue;
-        const config = ctx.modelRegistry.getRegisteredProviderConfig(
-          model.provider,
-        );
-        if (config) {
-          runtime.registerProvider(model.provider, config);
-          forwardedProviders.add(model.provider);
-        } else {
-          const provider = ctx.modelRegistry.getProvider(model.provider);
-          if (provider) {
-            runtime.registerNativeProvider(provider);
-            forwardedProviders.add(model.provider);
-          }
-        }
-      }
       const modelSpec = model?.trim();
       let resolvedModel: any | undefined;
       let resolvedThinking: any | undefined;
