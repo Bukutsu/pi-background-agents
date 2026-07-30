@@ -1441,17 +1441,17 @@ export default function (pi: ExtensionAPI) {
         for (const parentMessage of sanitizeForkMessages(ctx))
           sessionManager.appendMessage(parentMessage);
       const requestedThinking = thinking ?? resolvedThinking;
-      const scopedModel =
+      const scopedEntry =
         !resolvedModel && !existing
           ? (scopedList?.find(
               (s) =>
                 s.model.id === ctx.model?.id &&
                 s.model.provider === ctx.model?.provider,
-            )?.model ??
-            ctx.model ??
-            scopedList?.[0]?.model)
+            ) ?? scopedList?.[0])
           : undefined;
-      const selectedModel = resolvedModel ?? scopedModel;
+      const selectedModel = resolvedModel ?? scopedEntry?.model ?? ctx.model;
+      const effectiveThinking =
+        requestedThinking ?? scopedEntry?.thinkingLevel ?? ctx.thinkingLevel;
       checkSetup();
       const targetSessionId =
         existing?.sessionId ?? sessionManager.getSessionId();
@@ -1466,7 +1466,7 @@ export default function (pi: ExtensionAPI) {
           sessionManager,
           ...(selectedModel ? { model: selectedModel } : {}),
           ...(!existing
-            ? { thinkingLevel: requestedThinking ?? ctx.thinkingLevel }
+            ? { thinkingLevel: effectiveThinking }
             : requestedThinking
               ? { thinkingLevel: requestedThinking }
               : {}),
