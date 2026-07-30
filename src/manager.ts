@@ -189,8 +189,11 @@ export class JobManager {
           render(width: number) {
             const count = activeJobs.length;
             const innerWidth = Math.max(10, width - 2);
-            const title = ` Background Jobs (${count}) `;
-            const rightHint = " /bg ";
+            const hasBg = activeJobs.some((j) => j.kind === "shell");
+            const hasSub = activeJobs.some((j) => j.kind === "subagent");
+            const kind = hasBg && hasSub ? "bg+sub" : hasSub ? "subagent" : "bg";
+            const title = ` ${kind === "bg" ? "Background Jobs" : kind === "subagent" ? "Subagents" : "Jobs"} (${count}) `;
+            const rightHint = hasBg ? " /bg " : "";
             const topFillLen = Math.max(
               0,
               innerWidth - visibleWidth(title) - visibleWidth(rightHint),
@@ -209,16 +212,19 @@ export class JobManager {
 
             const jobLines = visibleJobs.map((job) => {
               const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-              const icon = theme.fg("accent", frame);
+              const icon = job.kind === "shell" ? theme.fg("accent", "⚡") : theme.fg("success", "●");
               const progress = job.activity ? `, ${job.activity}` : "";
               const badgeText = job.session?.model
                 ? `${job.session.model.id}:${job.session.thinkingLevel}`
-                : undefined;
+                : job.kind === "subagent" && job.record?.model
+                  ? job.record.model
+                  : undefined;
+              const kindTag = job.kind === "subagent" ? " [sub]" : "";
               const queueTag = job.completion === "queue" ? " Q" : "";
               const badge = badgeText
                 ? ` [${badgeText}${queueTag}]`
-                : queueTag
-                  ? ` [${queueTag.trim()}]`
+                : queueTag || kindTag
+                  ? `${kindTag}${queueTag ? " Q" : ""}`
                   : "";
               const prefix = ` ${icon} `;
               const meta = `${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
