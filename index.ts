@@ -138,6 +138,7 @@ interface BgJob {
   done?: Promise<void>;
   completion?: "queue" | "continue";
   sessionLock?: string;
+  stoppedManually?: boolean;
 }
 
 function readIndex(): Record<string, SubagentRecord> {
@@ -599,6 +600,7 @@ export default function (pi: ExtensionAPI) {
   function killJob(pid: number): boolean {
     const job = jobs.get(pid);
     if (!job) return false;
+    job.stoppedManually = true;
     job.controller.abort();
     // Jobs are deleted in their own finish/finalize path once abort resolves
     return true;
@@ -707,11 +709,13 @@ export default function (pi: ExtensionAPI) {
         : exitCode
           ? `\n\nExit code: ${exitCode}`
           : "";
-      deliverCompletion(
-        `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
-        completion,
-        expectedGeneration,
-      );
+      if (!job.stoppedManually) {
+        deliverCompletion(
+          `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
+          completion,
+          expectedGeneration,
+        );
+      }
       jobs.delete(pid);
       syncStatus(ctx);
     }
@@ -915,7 +919,7 @@ export default function (pi: ExtensionAPI) {
       if (action === "stop") {
         if (!job || job.kind !== "shell")
           throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
-        job.controller.abort();
+        killJob(job.pid);
         return {
           content: [
             { type: "text" as const, text: `Stopped shell job ${pid}` },
@@ -1215,7 +1219,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text" as const,
-              text: `Stopping subagent ${matching.sessionId}`,
+              text: `Stopped subagent ${matching.sessionId}`,
             },
           ],
           details: { sessionId: matching.sessionId },
@@ -1736,11 +1740,13 @@ export default function (pi: ExtensionAPI) {
             ? `\n\n${truncated.content}`
             : "";
           const reasonText = reason ? `\n\nReason: ${reason}` : "";
-          deliverCompletion(
-            `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
-            completion,
-            expectedGeneration,
-          );
+          if (!job.stoppedManually) {
+            deliverCompletion(
+              `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
+              completion,
+              expectedGeneration,
+            );
+          }
         } finally {
           clearTimeout(timer);
           unsubscribe();
