@@ -139,6 +139,24 @@ Use `/bg` to inspect or stop active jobs:
 
 Generated worktrees are not merged or removed automatically. Temporary logs may be cleared by the operating system. Child usage is reported by subagent status and completion messages, but it cannot be added retroactively to the already-finished parent tool call's usage total.
 
+## Custom providers
+
+By default, subagents can only use model providers the host has configured. To let a subagent use a provider shipped as an installed npm package (for example `antigravity`, which the host may not have configured), point `pi-bg` at it and it will register the provider with the host at load time:
+
+- Environment variable (comma- or space-separated):
+
+  ```sh
+  PI_BG_PROVIDERS=antigravity
+  ```
+
+- Or a sibling `pi-bg.config.json`:
+
+  ```json
+  { "providers": ["antigravity"] }
+  ```
+
+Each entry is a module specifier that resolves to a [`Provider`](https://github.com/Earendil-Works/pi) object or a provider config (`{ name, baseUrl, api, models, ... }`). Once registered, models such as `antigravity/gemini-3.6-flash` become selectable via the subagent `model` parameter like any built-in provider. A package that fails to load is logged and skipped, so one bad entry does not break the extension.
+
 ## Design constraints
 
 The implementation is intentionally small, but several pieces are required for correctness:

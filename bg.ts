@@ -13,6 +13,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionStats,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   Box,
@@ -37,9 +38,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-function createMarkdownComponent(text: string, theme: any) {
+function createMarkdownComponent(text: string, theme: Theme) {
   const mdTheme = {
     heading: (s: string) => theme.fg("toolTitle", theme.bold(s)),
     link: (s: string) => theme.fg("accent", s),
@@ -56,12 +58,41 @@ function createMarkdownComponent(text: string, theme: any) {
     strikethrough: (s: string) => s,
     underline: (s: string) => s,
   };
-  return new Markdown(text, 0, 0, mdTheme) as any;
+  return new Markdown(text, 0, 0, mdTheme);
+}
+
+function renderToolResult(
+  result: any,
+  options: { expanded?: boolean },
+  theme: Theme,
+  previewLines: number,
+) {
+  const text =
+    result.content
+      ?.map((c: any) => (c.type === "text" ? c.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim() || "";
+  if (!text) return new Text("", 0, 0);
+  if (options.expanded) return createMarkdownComponent(text, theme);
+  const lines = text.split("\n");
+  const preview = lines.slice(0, previewLines).join("\n");
+  const hidden = lines.length - previewLines;
+  const hint =
+    hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
+  return createMarkdownComponent(preview + hint, theme);
 }
 
 let logDir: string | undefined;
 const getLogDir = () =>
   (logDir ??= mkdtempSync(join(tmpdir(), "pi-background-agents-")));
+process.on("exit", () => {
+  if (logDir) {
+    try {
+      rmSync(logDir, { recursive: true, force: true });
+    } catch {}
+  }
+});
 const SUBAGENT_DIR = join(getAgentDir(), "pi-bg");
 const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
@@ -90,7 +121,6 @@ interface SubagentRecord {
   durationSec?: number;
   branch?: string;
   context: "project" | "fork";
-  modelFallback?: string;
   ownerPid?: number;
 }
 
@@ -252,8 +282,19 @@ function acquireSessionLock(sessionId: string) {
   const lock = join(SUBAGENT_LOCKS, sessionId);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      mkdirSync(lock, { mode: 0o700 });
-      writeFileSync(join(lock, "owner"), String(process.pid), { mode: 0o600 });
+      const tmp = `${lock}.tmp-${randomUUID()}`;
+      try {
+        mkdirSync(tmp, { mode: 0o700 });
+        writeFileSync(join(tmp, "owner"), String(process.pid), {
+          mode: 0o600,
+        });
+        renameSync(tmp, lock);
+      } catch (createError) {
+        try {
+          rmSync(tmp, { recursive: true, force: true });
+        } catch {}
+        throw createError;
+      }
       return lock;
     } catch (error: any) {
       if (error?.code !== "EEXIST") throw error;
@@ -292,6 +333,66 @@ function getSubagentHeading(
         : "Background subagent finished";
 }
 
+// ponytail: scopedModels only exists on pi >=0.83.0; guard so older hosts fall through to resolveCliModel
+function getScopedModels(ctx: ExtensionContext) {
+  return "scopedModels" in ctx
+    ? (ctx as { scopedModels?: Array<{ model: any; thinkingLevel?: any }> })
+        .scopedModels
+    : undefined;
+}
+
+// ponytail: let the user plug in model providers from installed npm packages
+// (e.g. "antigravity") that the host itself doesn't have configured. Sourced
+// from the PI_BG_PROVIDERS env var and an optional ./pi-bg.config.json.
+async function loadCustomProviders(pi: ExtensionAPI) {
+  const specifiers = new Set<string>();
+  const env = process.env.PI_BG_PROVIDERS?.split(/[,\s]+/).filter(Boolean);
+  if (env) for (const spec of env) specifiers.add(spec);
+  try {
+    let dir = ".";
+    try {
+      dir = dirname(fileURLToPath(import.meta.url));
+    } catch {}
+    const cfgPath = join(dir, "pi-bg.config.json");
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+      if (Array.isArray(cfg?.providers))
+        for (const p of cfg.providers)
+          if (typeof p === "string") specifiers.add(p);
+    }
+  } catch (error) {
+    console.warn("Could not read pi-bg provider config:", error);
+  }
+  for (const spec of specifiers) {
+    try {
+      const mod = await import(spec);
+      const candidates = Array.isArray(mod) ? mod : [mod.default ?? mod];
+      for (const candidate of candidates) {
+        if (!candidate || typeof candidate !== "object") continue;
+        if (
+          typeof candidate.id === "string" &&
+          (candidate.stream || candidate.complete)
+        ) {
+          pi.registerProvider(candidate);
+        } else {
+          const config = candidate.config ?? candidate.provider ?? candidate;
+          const name = config?.name ?? spec;
+          if (
+            config?.baseUrl ||
+            config?.api ||
+            config?.models ||
+            config?.apiKey ||
+            config?.oauth
+          )
+            pi.registerProvider(name, config);
+        }
+      }
+    } catch (error) {
+      console.warn(`Could not load custom provider package "${spec}":`, error);
+    }
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   const jobs = new Map<number, BgJob>();
   let nextVirtualPid = -1;
@@ -309,6 +410,8 @@ export default function (pi: ExtensionAPI) {
       saveRecord(record);
     }
   }
+
+  void loadCustomProviders(pi);
 
   pi.registerMessageRenderer("pi-bg-result", (message, options, theme) => {
     const text =
@@ -351,7 +454,7 @@ export default function (pi: ExtensionAPI) {
         box.addChild(createMarkdownComponent(preview + hint, theme));
       }
     }
-    return box as any;
+    return box;
   });
 
   const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -478,7 +581,6 @@ export default function (pi: ExtensionAPI) {
 
   function deliverCompletion(
     message: string,
-    ctx: ExtensionContext | undefined,
     completion: "queue" | "continue",
     expectedGeneration: number,
   ) {
@@ -503,7 +605,10 @@ export default function (pi: ExtensionAPI) {
 
   function resolveSubagentCwd(parent: string, requested?: string) {
     const root = realpathSync(parent);
-    const target = realpathSync(resolve(root, requested?.trim() || "."));
+    const requestedPath = resolve(root, requested?.trim() || ".");
+    if (!existsSync(requestedPath))
+      throw new Error(`cwd does not exist: ${requestedPath}`);
+    const target = realpathSync(requestedPath);
     const rel = relative(root, target);
     if (
       rel === ".." ||
@@ -606,7 +711,6 @@ export default function (pi: ExtensionAPI) {
           : "";
       deliverCompletion(
         `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
-        ctx,
         completion,
         expectedGeneration,
       );
@@ -635,9 +739,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, ctx) => {
     currentCtx = ctx;
-    const scopedList = (ctx as any).scopedModels as
-      | Array<{ model: any }>
-      | undefined;
+    const scopedList = getScopedModels(ctx);
     if (scopedList && scopedList.length > 0) {
       const modelsList = scopedList
         .map((s) => `\`${s.model.provider}/${s.model.id}\``)
@@ -674,7 +776,7 @@ export default function (pi: ExtensionAPI) {
     }
     await Promise.race([
       Promise.allSettled([...pending]),
-      new Promise((resolve) => setTimeout(resolve, 1000)),
+      new Promise((resolve) => setTimeout(resolve, 10000)),
     ]);
     currentCtx = undefined;
   });
@@ -824,7 +926,7 @@ export default function (pi: ExtensionAPI) {
           theme.fg("toolTitle", theme.bold("Background jobs status")),
           0,
           0,
-        ) as any;
+        );
       if (action === "stop")
         return new Text(
           theme.fg(
@@ -833,7 +935,7 @@ export default function (pi: ExtensionAPI) {
           ),
           0,
           0,
-        ) as any;
+        );
       const cmd = args.command || "...";
       const completionTag =
         args.completion === "queue" ? theme.fg("dim", " [queue]") : "";
@@ -841,42 +943,29 @@ export default function (pi: ExtensionAPI) {
         `${theme.fg("toolTitle", theme.bold(`$ bg: ${cmd}`))}${completionTag}`,
         0,
         0,
-      ) as any;
+      );
     },
     renderResult(result, options, theme, context) {
-      const text =
-        result.content
-          ?.map((c) => (c.type === "text" ? c.text : ""))
-          .filter(Boolean)
-          .join("\n")
-          .trim() || "";
-      if (!text) return new Text("", 0, 0) as any;
-      if (options.expanded) {
-        return createMarkdownComponent(text, theme);
-      }
-      const lines = text.split("\n");
-      const preview = lines.slice(0, 8).join("\n");
-      const hidden = lines.length - 8;
-      const hint =
-        hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
-      return createMarkdownComponent(preview + hint, theme);
+      return renderToolResult(result, options, theme, 8);
     },
   });
 
   function currentRecord(job: BgJob): SubagentRecord {
-    const stats = job.session!.getSessionStats();
+    if (!job.session || !job.record || !job.baseline)
+      throw new Error("currentRecord called on an incomplete job");
+    const stats = job.session.getSessionStats();
     return {
-      ...job.record!,
-      ...(job.session?.model
+      ...job.record,
+      ...(job.session.model
         ? {
             model: `${job.session.model.provider}/${job.session.model.id}`,
             thinking: job.session.thinkingLevel,
           }
         : {}),
-      turns: stats.assistantMessages - job.baseline!.assistantMessages,
-      toolCount: stats.toolCalls - job.baseline!.toolCalls,
+      turns: stats.assistantMessages - job.baseline.assistantMessages,
+      toolCount: stats.toolCalls - job.baseline.toolCalls,
       toolFailures: job.toolFailures ?? 0,
-      usage: usageSince(stats, job.baseline!),
+      usage: usageSince(stats, job.baseline),
     };
   }
 
@@ -885,24 +974,17 @@ export default function (pi: ExtensionAPI) {
   ) {
     if (sessions.length === 0) return "No matching subagent sessions.";
 
-    const stateIcon = (state: string) => {
-      switch (state) {
-        case "running":
-          return "●";
-        case "finished":
-          return "✓";
-        case "failed":
-        case "timed-out":
-        case "interrupted":
-        case "stopped":
-          return "✖";
-        default:
-          return "•";
-      }
+    const STATE_ICONS: Record<string, string> = {
+      running: "●",
+      finished: "✓",
+      failed: "✖",
+      "timed-out": "✖",
+      interrupted: "✖",
+      stopped: "✖",
     };
 
     const cards = sessions.map((s) => {
-      const icon = stateIcon(s.state);
+      const icon = STATE_ICONS[s.state] ?? "•";
       const duration =
         s.elapsedSec !== undefined
           ? `${s.elapsedSec}s`
@@ -1131,7 +1213,13 @@ export default function (pi: ExtensionAPI) {
             `Running subagent not found: ${requestedId || "missing sessionId"}`,
           );
         if (!message?.trim()) throw new Error("message is required for steer");
-        await matching.session.steer(message.trim());
+        try {
+          await matching.session.steer(message.trim());
+        } catch (error) {
+          if (!jobs.has(matching.pid))
+            throw new Error(`Subagent ${matching.sessionId} already finished`);
+          throw error;
+        }
         return {
           content: [
             {
@@ -1228,8 +1316,7 @@ export default function (pi: ExtensionAPI) {
       let resolvedModel: any | undefined;
       let resolvedThinking: any | undefined;
 
-      const scopedList = (ctx as any).scopedModels as
-        Array<{ model: any; thinkingLevel?: any }> | undefined;
+      const scopedList = getScopedModels(ctx);
       if (modelSpec) {
         if (scopedList && scopedList.length > 0) {
           const lowerSpec = modelSpec.toLowerCase();
@@ -1307,12 +1394,12 @@ export default function (pi: ExtensionAPI) {
       const scopedModel =
         !resolvedModel && !existing
           ? (scopedList?.find(
-                (s) =>
-                  s.model.id === ctx.model?.id &&
-                  s.model.provider === ctx.model?.provider,
-              )?.model ??
-             ctx.model ??
-             scopedList?.[0]?.model)
+              (s) =>
+                s.model.id === ctx.model?.id &&
+                s.model.provider === ctx.model?.provider,
+            )?.model ??
+            ctx.model ??
+            scopedList?.[0]?.model)
           : undefined;
       const selectedModel = resolvedModel ?? scopedModel;
       if (selectedModel) {
@@ -1363,7 +1450,7 @@ export default function (pi: ExtensionAPI) {
             });
           } catch {}
         }
-        session.dispose();
+        await session.dispose();
         if (sessionLock) rmSync(sessionLock, { recursive: true, force: true });
       };
       try {
@@ -1439,6 +1526,9 @@ export default function (pi: ExtensionAPI) {
         description?.trim() ||
         (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
       const displayModel = `${session.model.provider}/${session.model.id}`;
+      const fallback = modelFallbackMessage
+        ? `\nModel fallback: ${modelFallbackMessage}`
+        : "";
       const now = new Date().toISOString();
       const record: SubagentRecord = {
         sessionId: session.sessionId,
@@ -1464,7 +1554,6 @@ export default function (pi: ExtensionAPI) {
         inheritedTools: actualTools,
         branch,
         context: existing?.context ?? context,
-        modelFallback: modelFallbackMessage,
         ownerPid: process.pid,
       };
       const job: BgJob = {
@@ -1605,9 +1694,6 @@ export default function (pi: ExtensionAPI) {
             state === "finished"
               ? ""
               : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
-          const fallback = modelFallbackMessage
-            ? `\nModel fallback: ${modelFallbackMessage}`
-            : "";
           const header = `${getSubagentHeading(reason || (failed ? "failed" : undefined), timedOut, stopped)}: ${label}`;
           const mainContent = truncated.content
             ? `\n\n${truncated.content}`
@@ -1615,7 +1701,6 @@ export default function (pi: ExtensionAPI) {
           const reasonText = reason ? `\n\nReason: ${reason}` : "";
           deliverCompletion(
             `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
-            ctx,
             completion,
             expectedGeneration,
           );
@@ -1630,9 +1715,6 @@ export default function (pi: ExtensionAPI) {
       job.done = track(done);
 
       const location = branch ? `\nBranch: ${branch}` : "";
-      const fallback = modelFallbackMessage
-        ? `\nModel fallback: ${modelFallbackMessage}`
-        : "";
       const queueMsg =
         completion === "queue"
           ? " Output queued for next turn."
@@ -1674,7 +1756,7 @@ export default function (pi: ExtensionAPI) {
           ),
           0,
           0,
-        ) as any;
+        );
       if (action === "stop")
         return new Text(
           theme.fg(
@@ -1683,7 +1765,7 @@ export default function (pi: ExtensionAPI) {
           ),
           0,
           0,
-        ) as any;
+        );
       if (action === "steer")
         return new Text(
           theme.fg(
@@ -1694,7 +1776,7 @@ export default function (pi: ExtensionAPI) {
           ),
           0,
           0,
-        ) as any;
+        );
 
       const label = args.description || args.prompt || "...";
       const modelTag = args.model
@@ -1705,25 +1787,10 @@ export default function (pi: ExtensionAPI) {
         `${theme.fg("toolTitle", theme.bold(`Subagent: ${label}`))}${theme.fg("dim", modelTag + completionTag)}`,
         0,
         0,
-      ) as any;
+      );
     },
     renderResult(result, options, theme, context) {
-      const text =
-        result.content
-          ?.map((c) => (c.type === "text" ? c.text : ""))
-          .filter(Boolean)
-          .join("\n")
-          .trim() || "";
-      if (!text) return new Text("", 0, 0) as any;
-      if (options.expanded) {
-        return createMarkdownComponent(text, theme);
-      }
-      const lines = text.split("\n");
-      const preview = lines.slice(0, 10).join("\n");
-      const hidden = lines.length - 10;
-      const hint =
-        hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
-      return createMarkdownComponent(preview + hint, theme);
+      return renderToolResult(result, options, theme, 10);
     },
   });
 }
