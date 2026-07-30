@@ -14,7 +14,7 @@
   "license": "MIT",
   "author": "Bukutsu",
   "files": [
-    "bg.ts",
+    "index.ts",
     "README.md",
     "CONTRIBUTING.md",
     "CHANGELOG.md",
@@ -39,7 +39,7 @@
   },
   "pi": {
     "extensions": [
-      "./bg.ts"
+      "./index.ts"
     ]
   },
   "devDependencies": {
