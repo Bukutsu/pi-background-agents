@@ -38,7 +38,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 function createMarkdownComponent(text: string, theme: Theme) {
@@ -143,15 +150,21 @@ interface BgJob {
 }
 
 function readIndex(): Record<string, SubagentRecord> {
-  let legacy: Record<string, SubagentRecord> = {};
   if (existsSync(LEGACY_SUBAGENT_INDEX)) {
     try {
-      legacy = JSON.parse(readFileSync(LEGACY_SUBAGENT_INDEX, "utf8"));
+      const legacy: Record<string, SubagentRecord> = JSON.parse(
+        readFileSync(LEGACY_SUBAGENT_INDEX, "utf8"),
+      );
+      for (const record of Object.values(legacy)) {
+        if (record?.sessionId) saveRecord(record);
+      }
+      rmSync(LEGACY_SUBAGENT_INDEX, { force: true });
     } catch (error) {
       console.warn(`Ignoring invalid legacy subagent index:`, error);
     }
   }
-  if (!existsSync(SUBAGENT_INDEX)) return legacy;
+  const records: Record<string, SubagentRecord> = {};
+  if (!existsSync(SUBAGENT_INDEX)) return records;
   for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     try {
@@ -164,12 +177,12 @@ function readIndex(): Record<string, SubagentRecord> {
         !/^[a-zA-Z0-9-]+$/.test(record.sessionId)
       )
         throw new Error("invalid sessionId");
-      legacy[record.sessionId] = record;
+      records[record.sessionId] = record;
     } catch (error) {
       console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
     }
   }
-  return legacy;
+  return records;
 }
 
 function saveRecord(record: SubagentRecord) {
@@ -280,7 +293,7 @@ function acquireSessionLock(sessionId: string) {
     throw new Error(`Invalid subagent session ID: ${sessionId}`);
   mkdirSync(SUBAGENT_LOCKS, { recursive: true, mode: 0o700 });
   const lock = join(SUBAGENT_LOCKS, sessionId);
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const tmp = `${lock}.tmp-${randomUUID()}`;
       try {
@@ -309,10 +322,10 @@ function acquireSessionLock(sessionId: string) {
         rmSync(stale, { recursive: true, force: true });
       } catch (staleError: any) {
         if (staleError?.code === "ENOENT") {
-          try {
-            rmSync(lock, { recursive: true, force: true });
-          } catch {}
-        } else throw staleError;
+          continue;
+        } else if (staleError?.message?.includes("already running")) {
+          throw staleError;
+        }
       }
     }
   }
@@ -363,7 +376,14 @@ async function loadCustomProviders(pi: ExtensionAPI) {
   } catch (error) {
     console.warn("Could not read pi-bg provider config:", error);
   }
+  const VALID_SPECIFIER = /^[a-z0-9@][a-z0-9@/_.-]*$/i;
   for (const spec of specifiers) {
+    if (!VALID_SPECIFIER.test(spec)) {
+      console.warn(
+        `Ignoring invalid custom provider package specifier "${spec}"`,
+      );
+      continue;
+    }
     try {
       const mod = await import(spec);
       const candidates = Array.isArray(mod) ? mod : [mod.default ?? mod];
@@ -610,10 +630,7 @@ export default function (pi: ExtensionAPI) {
       throw new Error(`cwd does not exist: ${requestedPath}`);
     const target = realpathSync(requestedPath);
     const rel = relative(root, target);
-    if (
-      rel === ".." ||
-      rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-    ) {
+    if (rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error(
         `cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`,
       );
@@ -1432,9 +1449,9 @@ export default function (pi: ExtensionAPI) {
           : undefined;
       const selectedModel = resolvedModel ?? scopedModel;
       checkSetup();
-      let sessionLock = existing
-        ? acquireSessionLock(existing.sessionId)
-        : undefined;
+      const targetSessionId =
+        existing?.sessionId ?? sessionManager.getSessionId();
+      const sessionLock = acquireSessionLock(targetSessionId);
       let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
       try {
         created = await createAgentSession({
@@ -1451,10 +1468,9 @@ export default function (pi: ExtensionAPI) {
               : {}),
         });
         checkSetup();
-        sessionLock ??= acquireSessionLock(created.session.sessionId);
       } catch (error) {
         if (created) await created.session.dispose();
-        if (sessionLock) rmSync(sessionLock, { recursive: true, force: true });
+        rmSync(sessionLock, { recursive: true, force: true });
         throw error;
       }
       const { session, modelFallbackMessage, extensionsResult } = created!;
@@ -1640,10 +1656,11 @@ export default function (pi: ExtensionAPI) {
       });
       syncStatus(ctx);
       const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
+        if (!controller.signal.aborted) {
+          timedOut = true;
+          controller.abort();
+        }
       }, timeoutSec * 1000);
-      const operation = existing ? "continued" : "created";
       const done = (async () => {
         try {
           let thrown: string | undefined;
