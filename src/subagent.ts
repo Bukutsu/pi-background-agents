@@ -15,7 +15,12 @@ import {
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
+import {
+  type AssistantMessage,
+  type Model,
+  StringEnum,
+  type ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { JobManager } from "./manager.js";
@@ -29,6 +34,7 @@ import {
 } from "./types.js";
 import {
   acquireSessionLock,
+  extractTextContent,
   getScopedModels,
   getSubagentHeading,
   readIndex,
@@ -38,7 +44,7 @@ import {
   saveRecord,
   STATE_ICONS,
 } from "./utils.js";
-import { createWorktree } from "./worktree.js";
+import { createWorktree, removeWorktree } from "./worktree.js";
 
 export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
@@ -218,17 +224,12 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             .filter((job) => job.kind === "subagent" && job.record)
             .map((job) => [job.sessionId!, job]),
         );
-        const requestedRecord = requestedId
-          ? (active.get(requestedId)?.record ??
-            Array.from(active.values()).find((j) =>
-              j.sessionId?.startsWith(requestedId),
-            )?.record ??
-            findDurableRecord(requestedId))
-          : undefined;
         const records = requestedId
-          ? requestedRecord
-            ? [requestedRecord]
-            : []
+          ? matching?.record
+            ? [matching.record]
+            : findDurableRecord(requestedId)
+              ? [findDurableRecord(requestedId)!]
+              : []
           : [
               ...Array.from(active.values(), (job) => job.record!),
               ...Object.values(durable)
@@ -268,6 +269,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Running subagent not found: ${requestedId || "missing sessionId"}`,
           );
         if (!message?.trim()) throw new Error("message is required for steer");
+        if (completion) matching.completion = completion;
         try {
           await matching.session.steer(message.trim());
         } catch (error) {
@@ -331,256 +333,296 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
       let branch: string | undefined;
       let childCwd: string;
+      let isNewWorktree = false;
       if (existing) {
-        childCwd = resolveSubagentCwd(ctx.cwd, existing.cwd);
-        if (cwd && resolveSubagentCwd(ctx.cwd, cwd) !== childCwd)
-          throw new Error(
-            `cwd does not match the saved subagent cwd: ${childCwd}`,
-          );
+        childCwd = existing.cwd;
+        if (cwd) {
+          const resolvedCwd = resolveSubagentCwd(ctx.cwd, cwd);
+          if (resolvedCwd !== childCwd) {
+            throw new Error(
+              `cwd does not match the saved subagent cwd: ${childCwd}`,
+            );
+          }
+        }
         branch = existing.branch;
       } else if (worktree) {
         const created = await createWorktree(pi, ctx, setupSignal);
         childCwd = created.path;
         branch = created.branch;
+        isNewWorktree = true;
         checkSetup();
       } else {
         childCwd = resolveSubagentCwd(ctx.cwd, cwd);
       }
 
-      modelRuntime ??= ModelRuntime.create();
-      const runtime = await modelRuntime;
-      checkSetup();
-      const forwardedProviders = new Set<string>();
+      let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+      let modelFallbackMessage: string | undefined;
+      let extensionsResult: Awaited<
+        ReturnType<typeof createAgentSession>
+      >["extensionsResult"];
+      let sessionFile: string;
+      let sessionLock: string;
+      let controller: AbortController;
+      let actualTools: string[];
+      let disposeChild: () => Promise<void> = async () => {};
 
-      for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-        if (forwardedProviders.has(providerId)) continue;
-        const native =
-          ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-        const config =
-          ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-        if (native) {
-          runtime.registerNativeProvider(native);
-          forwardedProviders.add(providerId);
-        } else if (config) {
-          runtime.registerProvider(providerId, config);
-          forwardedProviders.add(providerId);
-        } else {
-          const provider = ctx.modelRegistry.getProvider(providerId);
-          if (provider) {
-            runtime.registerNativeProvider(provider);
-            forwardedProviders.add(providerId);
-          }
-        }
-      }
-
-      const modelSpec = model?.trim();
-      let resolvedModel: any | undefined;
-      let resolvedThinking: any | undefined;
-
-      const scopedList = getScopedModels(ctx);
-      if (modelSpec) {
-        if (scopedList && scopedList.length > 0) {
-          const lowerSpec = modelSpec.toLowerCase();
-          const exact = scopedList.find(
-            (s) =>
-              `${s.model.provider}/${s.model.id}`.toLowerCase() === lowerSpec ||
-              s.model.id.toLowerCase() === lowerSpec,
-          );
-          const matched =
-            exact ??
-            scopedList.find(
-              (s) =>
-                s.model.id.toLowerCase().includes(lowerSpec) ||
-                (s.model.name &&
-                  String(s.model.name).toLowerCase().includes(lowerSpec)) ||
-                s.model.provider.toLowerCase().includes(lowerSpec),
-            );
-          if (matched) {
-            resolvedModel = matched.model;
-            resolvedThinking = thinking ?? matched.thinkingLevel;
-          } else {
-            const availableNames = scopedList
-              .map((s) => `${s.model.provider}/${s.model.id}`)
-              .join(", ");
-            throw new Error(
-              `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
-            );
-          }
-        } else {
-          const resolved = resolveCliModel({
-            cliModel: modelSpec,
-            cliThinking: thinking,
-            modelRuntime: runtime,
-          });
-          if (resolved.error) throw new Error(resolved.error);
-          if (resolved.warning) console.warn(resolved.warning);
-          resolvedModel = resolved.model;
-          resolvedThinking = thinking ?? resolved.thinkingLevel;
-        }
-      }
-
-      const parentTools = pi
-        .getActiveTools()
-        .filter((name) => name !== "bg" && name !== "subagent");
-      const requestedTools = tools
-        ?.split(",")
-        .map((tool) => tool.trim())
-        .filter(Boolean);
-      const unknownTools =
-        requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
-      if (unknownTools.length)
-        throw new Error(
-          `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
-        );
-      const childTools = requestedTools ?? parentTools;
-
-      mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
-      const sessionManager = existing
-        ? SessionManager.open(
-            existing.sessionFile,
-            SUBAGENT_SESSION_DIR,
-            childCwd,
-          )
-        : SessionManager.create(
-            childCwd,
-            SUBAGENT_SESSION_DIR,
-            context === "fork"
-              ? { parentSession: ctx.sessionManager.getSessionFile() }
-              : undefined,
-          );
-      if (!existing && context === "fork")
-        for (const parentMessage of sanitizeForkMessages(ctx))
-          sessionManager.appendMessage(parentMessage);
-      const requestedThinking = thinking ?? resolvedThinking;
-      const scopedEntry =
-        !resolvedModel && !existing
-          ? (scopedList?.find(
-              (s) =>
-                s.model.id === ctx.model?.id &&
-                s.model.provider === ctx.model?.provider,
-            ) ?? scopedList?.[0])
-          : undefined;
-      const selectedModel =
-        resolvedModel ??
-        (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
-      const effectiveThinking =
-        requestedThinking ??
-        (!existing
-          ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
-          : undefined);
-      checkSetup();
-      const targetSessionId =
-        existing?.sessionId ?? sessionManager.getSessionId();
-      const sessionLock = acquireSessionLock(targetSessionId);
-      let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
       try {
-        created = await createAgentSession({
-          cwd: childCwd,
-          tools: childTools,
-          excludeTools: ["bg", "subagent"],
-          modelRuntime: runtime,
-          sessionManager,
-          ...(selectedModel ? { model: selectedModel } : {}),
-          ...(!existing
-            ? { thinkingLevel: effectiveThinking }
-            : requestedThinking
-              ? { thinkingLevel: requestedThinking }
-              : {}),
-        });
+        modelRuntime ??= ModelRuntime.create();
+        const runtime = await modelRuntime;
         checkSetup();
-      } catch (error) {
-        if (created) await created.session.dispose();
-        rmSync(sessionLock, { recursive: true, force: true });
-        throw error;
-      }
-      const { session, modelFallbackMessage, extensionsResult } = created!;
-      const controller = new AbortController();
-      let extensionsBound = false;
-      let disposed = false;
-      const disposeChild = async () => {
-        if (disposed) return;
-        disposed = true;
+        const forwardedProviders = new Set<string>();
+
+        for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
+          if (forwardedProviders.has(providerId)) continue;
+          try {
+            const native =
+              ctx.modelRegistry.getRegisteredNativeProvider(providerId);
+            const config =
+              ctx.modelRegistry.getRegisteredProviderConfig(providerId);
+            if (native) {
+              runtime.registerNativeProvider(native);
+              forwardedProviders.add(providerId);
+            } else if (config) {
+              runtime.registerProvider(providerId, config);
+              forwardedProviders.add(providerId);
+            } else {
+              const provider = ctx.modelRegistry.getProvider(providerId);
+              if (provider) {
+                runtime.registerNativeProvider(provider);
+                forwardedProviders.add(providerId);
+              }
+            }
+          } catch (providerError) {
+            console.warn(
+              `Could not forward provider ${providerId} to subagent runtime:`,
+              providerError,
+            );
+          }
+        }
+
+        const modelSpec = model?.trim();
+        let resolvedModel: Model<any> | undefined;
+        let resolvedThinking: any;
+
+        const scopedList = getScopedModels(ctx);
+        if (modelSpec) {
+          if (scopedList && scopedList.length > 0) {
+            const lowerSpec = modelSpec.toLowerCase();
+            const exact = scopedList.find(
+              (s) =>
+                `${s.model.provider}/${s.model.id}`.toLowerCase() ===
+                  lowerSpec || s.model.id.toLowerCase() === lowerSpec,
+            );
+            const matched =
+              exact ??
+              scopedList.find(
+                (s) =>
+                  s.model.id.toLowerCase().includes(lowerSpec) ||
+                  (s.model.name &&
+                    String(s.model.name).toLowerCase().includes(lowerSpec)) ||
+                  s.model.provider.toLowerCase().includes(lowerSpec),
+              );
+            if (matched) {
+              resolvedModel = matched.model;
+              resolvedThinking = (thinking ?? matched.thinkingLevel) as any;
+            } else {
+              const availableNames = scopedList
+                .map((s) => `${s.model.provider}/${s.model.id}`)
+                .join(", ");
+              throw new Error(
+                `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
+              );
+            }
+          } else {
+            const resolved = resolveCliModel({
+              cliModel: modelSpec,
+              cliThinking: thinking,
+              modelRuntime: runtime,
+            });
+            if (resolved.error) throw new Error(resolved.error);
+            if (resolved.warning) console.warn(resolved.warning);
+            resolvedModel = resolved.model;
+            resolvedThinking = (thinking ?? resolved.thinkingLevel) as any;
+          }
+        }
+
+        const parentTools = pi
+          .getActiveTools()
+          .filter((name) => name !== "bg" && name !== "subagent");
+        const requestedTools = tools
+          ?.split(",")
+          .map((tool) => tool.trim())
+          .filter(Boolean);
+        const unknownTools =
+          requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
+        if (unknownTools.length)
+          throw new Error(
+            `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
+          );
+        const childTools = requestedTools ?? parentTools;
+
+        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
+        const sessionManager = existing
+          ? SessionManager.open(
+              existing.sessionFile,
+              SUBAGENT_SESSION_DIR,
+              childCwd,
+            )
+          : SessionManager.create(
+              childCwd,
+              SUBAGENT_SESSION_DIR,
+              context === "fork"
+                ? { parentSession: ctx.sessionManager.getSessionFile() }
+                : undefined,
+            );
+        if (!existing && context === "fork")
+          for (const parentMessage of sanitizeForkMessages(ctx))
+            sessionManager.appendMessage(parentMessage as any);
+        const requestedThinking = thinking ?? resolvedThinking;
+        const scopedEntry =
+          !resolvedModel && !existing
+            ? (scopedList?.find(
+                (s) =>
+                  s.model.id === ctx.model?.id &&
+                  s.model.provider === ctx.model?.provider,
+              ) ?? scopedList?.[0])
+            : undefined;
+        const selectedModel =
+          resolvedModel ??
+          (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
+        const effectiveThinking =
+          requestedThinking ??
+          (!existing
+            ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
+            : undefined);
+        checkSetup();
+        const targetSessionId =
+          existing?.sessionId ?? sessionManager.getSessionId();
+        sessionLock = acquireSessionLock(targetSessionId);
+        let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
         try {
-          if (extensionsBound) {
+          created = await createAgentSession({
+            cwd: childCwd,
+            tools: childTools,
+            excludeTools: ["bg", "subagent"],
+            modelRuntime: runtime,
+            sessionManager,
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(!existing
+              ? { thinkingLevel: effectiveThinking as ThinkingLevel }
+              : requestedThinking
+                ? { thinkingLevel: requestedThinking as ThinkingLevel }
+                : {}),
+          });
+          checkSetup();
+        } catch (error) {
+          if (created) {
             try {
-              await session.extensionRunner.emit({
-                type: "session_shutdown",
-                reason: "quit",
-              });
+              await created.session.dispose();
             } catch {}
           }
-          await session.dispose();
-        } catch {}
-        try {
-          rmSync(sessionLock, { recursive: true, force: true });
-        } catch {}
-      };
-      try {
-        checkSetup();
-        extensionsBound = true;
-        await session.bindExtensions({
-          mode: "print",
-          abortHandler: () => void session.abort(),
-          shutdownHandler: () => controller.abort(),
-          onError: (error) =>
-            console.warn(`Subagent extension error: ${error.error}`),
-        });
-        checkSetup();
-        if (controller.signal.aborted)
-          throw new Error("Subagent extension requested shutdown during setup");
-        for (const error of extensionsResult.errors)
-          console.warn(
-            `Subagent extension failed to load ${error.path}: ${error.error}`,
-          );
-      } catch (error) {
-        await disposeChild();
-        throw error;
-      }
-
-      if (!session.model) {
-        await disposeChild();
-        throw new Error("Subagent session did not initialize a model");
-      }
-      const actualTools = session
-        .getActiveToolNames()
-        .filter((name) => name !== "bg" && name !== "subagent");
-      const missingTools =
-        requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
-      if (missingTools.length) {
-        await disposeChild();
-        throw new Error(
-          `Requested tools were not available in the child: ${missingTools.join(", ")}`,
-        );
-      }
-      try {
-        if (!existing) {
-          sessionManager.appendCustomEntry("pi-background-agents", {
-            createdAt: new Date().toISOString(),
-          });
-          if (context === "fork")
-            sessionManager.appendModelChange(
-              session.model.provider,
-              session.model.id,
-            );
+          try {
+            rmSync(sessionLock, { recursive: true, force: true });
+          } catch {}
+          throw error;
         }
-      } catch (error) {
-        await disposeChild();
-        throw error;
-      }
-      const sessionFile =
-        session.sessionFile ?? sessionManager.getSessionFile();
-      if (!sessionFile) {
-        await disposeChild();
-        throw new Error(
-          "Subagent session did not initialize a persistent session path",
-        );
+        session = created.session;
+        modelFallbackMessage = created.modelFallbackMessage;
+        extensionsResult = created.extensionsResult;
+
+        controller = new AbortController();
+        let extensionsBound = false;
+        let disposed = false;
+        disposeChild = async () => {
+          if (disposed) return;
+          disposed = true;
+          try {
+            if (extensionsBound) {
+              try {
+                await session.extensionRunner.emit({
+                  type: "session_shutdown",
+                  reason: "quit",
+                });
+              } catch {}
+            }
+            await session.dispose();
+          } catch {}
+          try {
+            rmSync(sessionLock, { recursive: true, force: true });
+          } catch {}
+        };
+        try {
+          checkSetup();
+          extensionsBound = true;
+          await session.bindExtensions({
+            mode: "print",
+            abortHandler: () => void session.abort(),
+            shutdownHandler: () => controller.abort(),
+            onError: (error) =>
+              console.warn(`Subagent extension error: ${error.error}`),
+          });
+          checkSetup();
+          if (controller.signal.aborted)
+            throw new Error(
+              "Subagent extension requested shutdown during setup",
+            );
+          for (const error of extensionsResult.errors)
+            console.warn(
+              `Subagent extension failed to load ${error.path}: ${error.error}`,
+            );
+        } catch (error) {
+          await disposeChild();
+          throw error;
+        }
+
+        if (!session.model) {
+          await disposeChild();
+          throw new Error("Subagent session did not initialize a model");
+        }
+        actualTools = session.getActiveToolNames();
+        const missingTools =
+          requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
+        if (missingTools.length) {
+          await disposeChild();
+          throw new Error(
+            `Requested tools were not available in the child: ${missingTools.join(", ")}`,
+          );
+        }
+        try {
+          if (!existing) {
+            sessionManager.appendCustomEntry("pi-background-agents", {
+              createdAt: new Date().toISOString(),
+            });
+            if (context === "fork")
+              sessionManager.appendModelChange(
+                session.model.provider,
+                session.model.id,
+              );
+          }
+        } catch (error) {
+          await disposeChild();
+          throw error;
+        }
+        sessionFile =
+          session.sessionFile ?? sessionManager.getSessionFile() ?? "";
+        if (!sessionFile) {
+          await disposeChild();
+          throw new Error(
+            "Subagent session did not initialize a persistent session path",
+          );
+        }
+      } catch (setupError) {
+        if (isNewWorktree) {
+          await removeWorktree(pi, ctx.cwd, childCwd, branch);
+        }
+        throw setupError;
       }
 
-      const pid = manager.nextVirtualPid--;
+      const pid = manager.nextVirtualPid++;
       let timedOut = false;
       let cancelled = false;
-      let partialAssistant: any;
-      const runAssistants: any[] = [];
+      let lastAssistantMessage: AssistantMessage | undefined;
+      const activeTools = new Map<string, string>();
       if (controller.signal.aborted) {
         cancelled = !timedOut;
         void session.abort().catch(() => {});
@@ -641,8 +683,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         baseline: session.getSessionStats(),
         record,
         toolFailures: 0,
-        activeTools: new Map(),
-        sessionLock,
+        activeTools,
       };
       try {
         manager.jobs.set(pid, job);
@@ -650,6 +691,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       } catch (error) {
         manager.jobs.delete(pid);
         await disposeChild();
+        if (isNewWorktree) {
+          await removeWorktree(pi, ctx.cwd, childCwd, branch);
+        }
         throw error;
       }
 
@@ -660,28 +704,27 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       };
       const unsubscribe = session.subscribe((event) => {
         if (
-          event.type === "message_update" &&
+          (event.type === "message_update" || event.type === "message_end") &&
           event.message.role === "assistant"
-        )
-          partialAssistant = event.message;
-        if (event.type === "message_end" && event.message.role === "assistant")
-          runAssistants.push(event.message);
+        ) {
+          lastAssistantMessage = event.message;
+        }
         if (event.type === "turn_start") setActivity("thinking");
         else if (
           event.type === "message_update" &&
-          event.assistantMessageEvent.type === "text_delta" &&
-          !job.activeTools!.size
+          event.assistantMessageEvent?.type === "text_delta" &&
+          !activeTools.size
         )
           setActivity("responding");
         else if (event.type === "tool_execution_start") {
-          job.activeTools!.set(event.toolCallId, event.toolName);
-          setActivity(`tool: ${[...job.activeTools!.values()].join(", ")}`);
+          activeTools.set(event.toolCallId, event.toolName);
+          setActivity(`tool: ${[...activeTools.values()].join(", ")}`);
         } else if (event.type === "tool_execution_end") {
-          job.activeTools!.delete(event.toolCallId);
+          activeTools.delete(event.toolCallId);
           if (event.isError) job.toolFailures!++;
           setActivity(
-            job.activeTools!.size
-              ? `tool: ${[...job.activeTools!.values()].join(", ")}`
+            activeTools.size
+              ? `tool: ${[...activeTools.values()].join(", ")}`
               : event.isError
                 ? `tool failed: ${event.toolName}`
                 : "thinking",
@@ -703,7 +746,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           } catch (error) {
             thrown = error instanceof Error ? error.message : String(error);
           }
-          const assistant = runAssistants.at(-1) ?? partialAssistant;
+          const assistant = lastAssistantMessage;
           const stopped = cancelled || assistant?.stopReason === "aborted";
           const failed = Boolean(
             thrown ||
@@ -718,16 +761,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
                 ? "failed"
                 : "finished";
           let reason = thrown ?? assistant?.errorMessage;
-          const rawText = Array.isArray(assistant?.content)
-            ? assistant.content
-                .filter(
-                  (part: any) =>
-                    part?.type === "text" && typeof part.text === "string",
-                )
-                .map((part: any) => part.text)
-                .join("\n")
-                .trim()
-            : "";
+          const rawText = extractTextContent(assistant?.content).trim();
           const truncated = truncateTail(rawText);
           let truncationNote = "";
           if (truncated.truncated) {
@@ -867,7 +901,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         0,
       );
     },
-    renderResult(result, options, theme, context) {
+    renderResult(result, options, theme, _context) {
       return renderToolResult(result, options, theme, 10);
     },
   });

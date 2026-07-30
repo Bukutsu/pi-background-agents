@@ -13,17 +13,35 @@ import {
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type {
+  AgentToolResult,
   ExtensionAPI,
   ExtensionContext,
   SessionStats,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Markdown, Text } from "@earendil-works/pi-tui";
+import type { Model, Provider } from "@earendil-works/pi-ai";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 import {
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   type SubagentRecord,
 } from "./types.js";
+
+export function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((c) =>
+      c &&
+      typeof c === "object" &&
+      c.type === "text" &&
+      typeof c.text === "string"
+        ? c.text
+        : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+}
 
 export function createMarkdownComponent(text: string, theme: Theme) {
   const mdTheme = {
@@ -46,17 +64,12 @@ export function createMarkdownComponent(text: string, theme: Theme) {
 }
 
 export function renderToolResult(
-  result: any,
+  result: AgentToolResult<unknown>,
   options: { expanded?: boolean },
   theme: Theme,
   previewLines: number,
 ) {
-  const text =
-    result.content
-      ?.map((c: any) => (c.type === "text" ? c.text : ""))
-      .filter(Boolean)
-      .join("\n")
-      .trim() || "";
+  const text = extractTextContent(result.content).trim();
   if (!text) return new Text("", 0, 0);
   if (options.expanded) return createMarkdownComponent(text, theme);
   const lines = text.split("\n");
@@ -79,22 +92,26 @@ export const STATE_ICONS: Record<string, string> = {
 export function readIndex(): Record<string, SubagentRecord> {
   const records: Record<string, SubagentRecord> = {};
   if (!existsSync(SUBAGENT_INDEX)) return records;
-  for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-    try {
-      const record = JSON.parse(
-        readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8"),
-      ) as SubagentRecord;
-      if (
-        !record ||
-        typeof record.sessionId !== "string" ||
-        !/^[a-zA-Z0-9-]+$/.test(record.sessionId)
-      )
-        throw new Error("invalid sessionId");
-      records[record.sessionId] = record;
-    } catch (error) {
-      console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
+  try {
+    for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      try {
+        const record = JSON.parse(
+          readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8"),
+        ) as SubagentRecord;
+        if (
+          !record ||
+          typeof record.sessionId !== "string" ||
+          !/^[a-zA-Z0-9-]+$/.test(record.sessionId)
+        )
+          throw new Error("invalid sessionId");
+        records[record.sessionId] = record;
+      } catch (error) {
+        console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
+      }
     }
+  } catch (error) {
+    console.warn("Could not read subagent index directory:", error);
   }
   return records;
 }
@@ -105,21 +122,30 @@ export function saveRecord(record: SubagentRecord) {
   mkdirSync(SUBAGENT_INDEX, { recursive: true, mode: 0o700 });
   const target = join(SUBAGENT_INDEX, `${record.sessionId}.json`);
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
-    mode: 0o600,
-    flush: true,
-  });
-  renameSync(temporary, target);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
+      mode: 0o600,
+      flush: true,
+    });
+    renameSync(temporary, target);
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {}
+    throw error;
+  }
 }
 
 export function usageSince(current: SessionStats, baseline: SessionStats) {
   return {
-    input: current.tokens.input - baseline.tokens.input,
-    output: current.tokens.output - baseline.tokens.output,
-    cacheRead: current.tokens.cacheRead - baseline.tokens.cacheRead,
-    cacheWrite: current.tokens.cacheWrite - baseline.tokens.cacheWrite,
-    total: current.tokens.total - baseline.tokens.total,
-    cost: current.cost - baseline.cost,
+    input: (current.tokens?.input ?? 0) - (baseline.tokens?.input ?? 0),
+    output: (current.tokens?.output ?? 0) - (baseline.tokens?.output ?? 0),
+    cacheRead:
+      (current.tokens?.cacheRead ?? 0) - (baseline.tokens?.cacheRead ?? 0),
+    cacheWrite:
+      (current.tokens?.cacheWrite ?? 0) - (baseline.tokens?.cacheWrite ?? 0),
+    total: (current.tokens?.total ?? 0) - (baseline.tokens?.total ?? 0),
+    cost: (current.cost ?? 0) - (baseline.cost ?? 0),
   };
 }
 
@@ -134,7 +160,7 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
     ),
   );
   const callIds = new Set<string>();
-  const sanitized: any[] = [];
+  const sanitized: Array<Record<string, unknown>> = [];
   for (const message of messages) {
     if (message.role === "custom" && message.customType === "pi-bg-result")
       continue;
@@ -151,11 +177,11 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
     }
     if (message.role === "assistant") {
       if (typeof message.content === "string") {
-        sanitized.push(message);
+        sanitized.push(message as unknown as Record<string, unknown>);
         continue;
       }
       if (!Array.isArray(message.content)) continue;
-      const content = message.content.filter((part) => {
+      const content = message.content.filter((part: any) => {
         if (part.type !== "toolCall") return true;
         if (["bg", "subagent"].includes(part.name) || !resultIds.has(part.id))
           return false;
@@ -166,23 +192,7 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
         sanitized.push({
           ...message,
           content,
-          usage: {
-            ...message.usage,
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            cacheWrite1h: 0,
-            reasoning: 0,
-            totalTokens: 0,
-            cost: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              total: 0,
-            },
-          },
+          usage: undefined,
         });
       continue;
     }
@@ -191,18 +201,18 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
         sanitized.push({ ...message, usage: undefined });
       continue;
     }
-    sanitized.push(message);
+    sanitized.push(message as unknown as Record<string, unknown>);
   }
-  return sanitized;
+  return sanitized as any;
 }
 
 export function processIsAlive(pid?: number) {
-  if (!pid) return false;
+  if (!pid || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
   }
 }
 
@@ -227,13 +237,16 @@ export function acquireSessionLock(sessionId: string) {
         throw createError;
       }
       return lock;
-    } catch (error: any) {
-      if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
+    } catch (error: unknown) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code !== "EEXIST" && err?.code !== "ENOTEMPTY") throw error;
       try {
         const ownerFile = join(lock, "owner");
-        const owner = existsSync(ownerFile)
-          ? Number(readFileSync(ownerFile, "utf8"))
-          : NaN;
+        let owner = NaN;
+        try {
+          if (existsSync(ownerFile))
+            owner = Number(readFileSync(ownerFile, "utf8"));
+        } catch {}
         if (!Number.isNaN(owner) && processIsAlive(owner))
           throw new Error(
             `Subagent session ${sessionId} is already running in process ${owner}`,
@@ -241,12 +254,12 @@ export function acquireSessionLock(sessionId: string) {
         const stale = `${lock}.stale-${randomUUID()}`;
         renameSync(lock, stale);
         rmSync(stale, { recursive: true, force: true });
-      } catch (staleError: any) {
-        if (staleError?.code === "ENOENT") {
+      } catch (staleError: unknown) {
+        const staleErr = staleError as NodeJS.ErrnoException;
+        if (staleErr?.code === "ENOENT") {
           continue;
-        } else if (staleError?.message?.includes("already running")) {
-          throw staleError;
         }
+        throw staleError;
       }
     }
   }
@@ -270,8 +283,14 @@ export function getSubagentHeading(
 // ponytail: scopedModels only exists on pi >=0.83.0; guard so older hosts fall through to resolveCliModel
 export function getScopedModels(ctx: ExtensionContext) {
   return "scopedModels" in ctx
-    ? (ctx as { scopedModels?: Array<{ model: any; thinkingLevel?: any }> })
-        .scopedModels
+    ? (
+        ctx as {
+          scopedModels?: Array<{
+            model: Model<any>;
+            thinkingLevel?: string;
+          }>;
+        }
+      ).scopedModels
     : undefined;
 }
 
@@ -303,14 +322,25 @@ export async function loadCustomProviders(pi: ExtensionAPI) {
     }
     try {
       const mod = await import(spec);
-      const candidates = Array.isArray(mod) ? mod : [mod.default ?? mod];
+      const candidates = Array.isArray(mod)
+        ? mod
+        : [
+            mod.default ??
+              Object.values(mod).find(
+                (v: any) =>
+                  v &&
+                  typeof v === "object" &&
+                  ("stream" in v || "complete" in v),
+              ) ??
+              mod,
+          ];
       for (const candidate of candidates) {
         if (!candidate || typeof candidate !== "object") continue;
         if (
           typeof candidate.id === "string" &&
           (candidate.stream || candidate.complete)
         ) {
-          pi.registerProvider(candidate);
+          pi.registerProvider(candidate as Provider);
         } else {
           pi.registerProvider(candidate.name ?? spec, candidate);
         }
@@ -322,13 +352,28 @@ export async function loadCustomProviders(pi: ExtensionAPI) {
 }
 
 export function resolveSubagentCwd(parent: string, requested?: string) {
-  const root = realpathSync(parent);
+  let root = parent;
+  try {
+    root = realpathSync(parent);
+  } catch {}
   const requestedPath = resolve(root, requested?.trim() || ".");
   if (!existsSync(requestedPath))
     throw new Error(`cwd does not exist: ${requestedPath}`);
-  const target = realpathSync(requestedPath);
-  const rel = relative(root, target);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
+  let target = requestedPath;
+  try {
+    target = realpathSync(requestedPath);
+  } catch {}
+  const relRoot = relative(root, target);
+  const relParent = relative(parent, target);
+  const isTraversal =
+    relRoot === ".." ||
+    relRoot.startsWith(".." + "/") ||
+    (process.platform === "win32" && relRoot.startsWith(".." + "\\"));
+  const isTraversalParent =
+    relParent === ".." ||
+    relParent.startsWith(".." + "/") ||
+    (process.platform === "win32" && relParent.startsWith(".." + "\\"));
+  if (isTraversal && isTraversalParent) {
     throw new Error(
       `cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`,
     );

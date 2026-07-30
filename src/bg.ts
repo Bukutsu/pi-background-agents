@@ -27,7 +27,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     const expectedGeneration = manager.generation;
     const shownCommand =
       command.length > 120 ? `${command.slice(0, 117)}...` : command;
-    const pid = manager.nextVirtualPid--;
+    const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
     let output = "";
     let outputTruncated = false;
@@ -79,12 +79,14 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       const content = output.trim();
       const keepLog =
         cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
-      const logFile = keepLog ? join(getLogDir(), `${randomUUID()}.log`) : "";
+      let logFile = "";
       if (keepLog) {
         try {
+          logFile = join(getLogDir(), `${randomUUID()}.log`);
           writeFileSync(logFile, content || message, { mode: 0o600 });
         } catch (logError) {
           console.warn(`Could not save background task log:`, logError);
+          logFile = "";
         }
       }
       const heading = timedOut
@@ -139,7 +141,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     handler: async (args, ctx) => {
       manager.currentCtx = ctx;
       const trimmed = args?.trim() ?? "";
-      const killMatch = trimmed.match(/^(?:kill\s+)?(-?\d+)$/);
+      const killMatch = trimmed.match(/^(?:kill\s+)?(\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);
         if (manager.killJob(pid)) {
@@ -218,7 +220,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
             content: [
               { type: "text" as const, text: "No shell jobs running." },
             ],
-            details: {},
+            details: { jobs: [] },
           };
         }
         const items = listed.map((job) => {
@@ -228,11 +230,17 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
         const text = items.join("\n");
         return {
           content: [{ type: "text" as const, text }],
-          details: {},
+          details: {
+            jobs: listed.map((j) => ({
+              pid: j.pid,
+              command: j.command,
+              startedAt: j.startedAt,
+            })),
+          },
         };
       }
-      const job = pid === undefined ? undefined : manager.jobs.get(pid);
       if (action === "stop") {
+        const job = pid === undefined ? undefined : manager.jobs.get(pid);
         if (!job || job.kind !== "shell")
           throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
         manager.killJob(job.pid);
@@ -272,7 +280,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
         0,
       );
     },
-    renderResult(result, options, theme, context) {
+    renderResult(result, options, theme, _context) {
       return renderToolResult(result, options, theme, 8);
     },
   });

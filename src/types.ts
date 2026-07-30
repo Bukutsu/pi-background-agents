@@ -33,7 +33,7 @@ export interface SubagentRecord {
   cwd: string;
   sessionFile: string;
   model: string;
-  thinking: string;
+  thinking?: string;
   label: string;
   createdAt: string;
   updatedAt: string;
@@ -64,6 +64,5 @@ export interface BgJob {
   activeTools?: Map<string, string>;
   done?: Promise<void>;
   completion?: "queue" | "continue";
-  sessionLock?: string;
   stoppedManually?: boolean;
 }

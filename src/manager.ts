@@ -11,6 +11,7 @@ import {
 import type { BgJob, SubagentRecord } from "./types.js";
 import {
   createMarkdownComponent,
+  extractTextContent,
   getScopedModels,
   processIsAlive,
   readIndex,
@@ -22,13 +23,18 @@ const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 
 export class JobManager {
   public jobs = new Map<number, BgJob>();
-  public nextVirtualPid = -1;
+  public nextVirtualPid = 1;
   public currentCtx: ExtensionContext | undefined;
   public generation = 0;
   public shuttingDown = true;
   public lifecycle = new AbortController();
   public pending = new Set<Promise<void>>();
   private widgetTimer: ReturnType<typeof setInterval> | undefined;
+  private pendingCompletions: Array<{
+    message: string;
+    completion: "queue" | "continue";
+    expectedGeneration: number;
+  }> = [];
 
   constructor(public pi: ExtensionAPI) {}
 
@@ -49,14 +55,7 @@ export class JobManager {
     this.pi.registerMessageRenderer(
       "pi-bg-result",
       (message, options, theme) => {
-        const text =
-          typeof message.content === "string"
-            ? message.content
-            : Array.isArray(message.content)
-              ? message.content
-                  .map((c) => (c.type === "text" ? c.text : ""))
-                  .join("")
-              : "";
+        const text = extractTextContent(message.content);
         if (!text.trim()) return undefined;
 
         const lines = text.trim().split("\n");
@@ -99,12 +98,12 @@ export class JobManager {
       this.generation++;
       this.shuttingDown = false;
       this.lifecycle = new AbortController();
-      this.currentCtx = ctx;
+      this.flushPendingCompletions(ctx);
       this.syncStatus(ctx);
     });
 
-    this.pi.on("before_agent_start", async (event, ctx) => {
-      this.currentCtx = ctx;
+    this.pi.on("before_agent_start", (event, ctx) => {
+      this.flushPendingCompletions(ctx);
       const scopedList = getScopedModels(ctx);
       if (scopedList && scopedList.length > 0) {
         const modelsList = scopedList
@@ -161,7 +160,13 @@ export class JobManager {
   }
 
   public syncStatus(ctx?: ExtensionContext) {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown) {
+      if (this.widgetTimer) {
+        clearInterval(this.widgetTimer);
+        this.widgetTimer = undefined;
+      }
+      return;
+    }
     const active = this.currentCtx ?? ctx;
     if (!active) return;
 
@@ -190,11 +195,13 @@ export class JobManager {
               0,
               innerWidth - visibleWidth(title) - visibleWidth(rightHint),
             );
-            const top =
+            const top = truncateToWidth(
               bColor("╭") +
-              theme.fg("accent", theme.bold(title)) +
-              bColor("─".repeat(topFillLen)) +
-              bColor(rightHint + "╮");
+                theme.fg("accent", theme.bold(title)) +
+                bColor("─".repeat(topFillLen)) +
+                bColor(rightHint + "╮"),
+              width,
+            );
 
             const maxVisible = 3;
             const overflow = count > maxVisible;
@@ -261,6 +268,33 @@ export class JobManager {
     }
   }
 
+  private sendCompletionMessage(
+    message: string,
+    completion: "queue" | "continue",
+    ctx: ExtensionContext,
+  ) {
+    this.pi.sendMessage(
+      { customType: "pi-bg-result", content: message, display: true },
+      completion === "queue"
+        ? { deliverAs: "nextTurn" }
+        : { deliverAs: "steer", triggerTurn: ctx.isIdle() },
+    );
+  }
+
+  private flushPendingCompletions(ctx: ExtensionContext) {
+    this.currentCtx = ctx;
+    while (this.pendingCompletions.length > 0) {
+      const item = this.pendingCompletions.shift()!;
+      if (!this.shuttingDown && this.generation === item.expectedGeneration) {
+        try {
+          this.sendCompletionMessage(item.message, item.completion, ctx);
+        } catch (error) {
+          console.warn("Could not deliver pending bg result:", error);
+        }
+      }
+    }
+  }
+
   public guard(expectedGeneration: number) {
     if (
       this.shuttingDown ||
@@ -272,10 +306,8 @@ export class JobManager {
 
   public track(done: Promise<void>) {
     this.pending.add(done);
-    void done.then(
-      () => this.pending.delete(done),
-      () => this.pending.delete(done),
-    );
+    void done.finally(() => this.pending.delete(done));
+    done.catch(() => {});
     return done;
   }
 
@@ -286,13 +318,19 @@ export class JobManager {
   ) {
     if (this.shuttingDown || this.generation !== expectedGeneration) return;
     const active = this.currentCtx;
-    if (!active) return;
-    this.pi.sendMessage(
-      { customType: "pi-bg-result", content: message, display: true },
-      completion === "queue"
-        ? { deliverAs: "nextTurn" }
-        : { deliverAs: "steer", triggerTurn: active.isIdle() },
-    );
+    if (!active) {
+      this.pendingCompletions.push({
+        message,
+        completion,
+        expectedGeneration,
+      });
+      return;
+    }
+    try {
+      this.sendCompletionMessage(message, completion, active);
+    } catch (error) {
+      console.warn("Could not deliver bg result:", error);
+    }
   }
 
   public killJob(pid: number): boolean {
