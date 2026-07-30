@@ -1,0 +1,342 @@
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import {
+  Box,
+  Text,
+  visibleWidth,
+  truncateToWidth,
+} from "@earendil-works/pi-tui";
+import type { BgJob, SubagentRecord } from "./types.js";
+import {
+  createMarkdownComponent,
+  getScopedModels,
+  processIsAlive,
+  readIndex,
+  saveRecord,
+  usageSince,
+} from "./utils.js";
+
+const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+export class JobManager {
+  public jobs = new Map<number, BgJob>();
+  public nextVirtualPid = -1;
+  public currentCtx: ExtensionContext | undefined;
+  public generation = 0;
+  public shuttingDown = true;
+  public lifecycle = new AbortController();
+  public pending = new Set<Promise<void>>();
+  private widgetTimer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(public pi: ExtensionAPI) {}
+
+  public init() {
+    for (const record of Object.values(readIndex())) {
+      if (record.state === "running" && !processIsAlive(record.ownerPid)) {
+        record.state = "interrupted";
+        record.updatedAt = new Date().toISOString();
+        saveRecord(record);
+      }
+    }
+
+    this.registerMessageRenderer();
+    this.registerLifecycleEvents();
+  }
+
+  private registerMessageRenderer() {
+    this.pi.registerMessageRenderer(
+      "pi-bg-result",
+      (message, options, theme) => {
+        const text =
+          typeof message.content === "string"
+            ? message.content
+            : Array.isArray(message.content)
+              ? message.content
+                  .map((c) => (c.type === "text" ? c.text : ""))
+                  .join("")
+              : "";
+        if (!text.trim()) return undefined;
+
+        const lines = text.trim().split("\n");
+        const firstLine = lines[0] ?? "";
+        const isError =
+          firstLine.toLowerCase().includes("failed") ||
+          firstLine.toLowerCase().includes("timed out") ||
+          firstLine.toLowerCase().includes("stopped");
+
+        const bgFn = isError
+          ? (s: string) => theme.bg("toolErrorBg", s)
+          : (s: string) => theme.bg("toolSuccessBg", s);
+
+        const titleColor = isError ? "error" : "accent";
+        const headerText = theme.fg(titleColor, theme.bold(firstLine));
+
+        const bodyText = lines.slice(1).join("\n").trim();
+        const box = new Box(1, 1, bgFn);
+        box.addChild(new Text(headerText, 0, 0));
+
+        if (bodyText) {
+          if (options.expanded) {
+            box.addChild(createMarkdownComponent(bodyText, theme));
+          } else {
+            const bodyLines = bodyText.split("\n");
+            const preview = bodyLines.slice(0, 8).join("\n");
+            const hidden = Math.max(0, bodyLines.length - 8);
+            const hint =
+              hidden > 0 ? `\n\n_${hidden} more lines (expand to view)_` : "";
+            box.addChild(createMarkdownComponent(preview + hint, theme));
+          }
+        }
+        return box;
+      },
+    );
+  }
+
+  private registerLifecycleEvents() {
+    this.pi.on("session_start", (_e, ctx) => {
+      this.generation++;
+      this.shuttingDown = false;
+      this.lifecycle = new AbortController();
+      this.currentCtx = ctx;
+      this.syncStatus(ctx);
+    });
+
+    this.pi.on("before_agent_start", async (event, ctx) => {
+      this.currentCtx = ctx;
+      const scopedList = getScopedModels(ctx);
+      if (scopedList && scopedList.length > 0) {
+        const modelsList = scopedList
+          .map((s) => `\`${s.model.provider}/${s.model.id}\``)
+          .join(", ");
+        return {
+          systemPrompt: `${event.systemPrompt}\n\nAvailable scoped subagent models: ${modelsList}`,
+        };
+      }
+    });
+
+    this.pi.on("session_shutdown", async () => {
+      this.shuttingDown = true;
+      this.lifecycle.abort();
+      if (this.widgetTimer) {
+        clearInterval(this.widgetTimer);
+        this.widgetTimer = undefined;
+      }
+      for (const [pid, job] of this.jobs) {
+        try {
+          if (job.record) {
+            job.record = {
+              ...this.currentRecord(job),
+              state: "interrupted",
+              updatedAt: new Date().toISOString(),
+              durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+            };
+            saveRecord(job.record);
+          }
+        } catch (error) {
+          console.warn(
+            `Could not persist interrupted background job ${pid}:`,
+            error,
+          );
+        } finally {
+          this.killJob(pid);
+        }
+      }
+      let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<void>((resolve) => {
+        shutdownTimeout = setTimeout(resolve, 10000);
+        shutdownTimeout.unref?.();
+      });
+      try {
+        await Promise.race([
+          Promise.allSettled([...this.pending]),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (shutdownTimeout) clearTimeout(shutdownTimeout);
+      }
+      this.currentCtx = undefined;
+    });
+  }
+
+  public syncStatus(ctx?: ExtensionContext) {
+    if (this.shuttingDown) return;
+    const active = this.currentCtx ?? ctx;
+    if (!active) return;
+
+    const activeJobs = Array.from(this.jobs.values());
+    if (activeJobs.length === 0) {
+      active.ui.setWidget("bg-subagents", undefined);
+      if (this.widgetTimer) {
+        clearInterval(this.widgetTimer);
+        this.widgetTimer = undefined;
+      }
+      return;
+    }
+
+    active.ui.setWidget(
+      "bg-subagents",
+      (_tui, theme) => {
+        const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
+        const bColor = (str: string) => theme.fg("dim", str);
+        return {
+          render(width: number) {
+            const count = activeJobs.length;
+            const innerWidth = Math.max(10, width - 2);
+            const title = ` Background Jobs (${count}) `;
+            const rightHint = " /bg ";
+            const topFillLen = Math.max(
+              0,
+              innerWidth - visibleWidth(title) - visibleWidth(rightHint),
+            );
+            const top =
+              bColor("╭") +
+              theme.fg("accent", theme.bold(title)) +
+              bColor("─".repeat(topFillLen)) +
+              bColor(rightHint + "╮");
+
+            const maxVisible = 3;
+            const overflow = count > maxVisible;
+            const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
+
+            const jobLines = visibleJobs.map((job) => {
+              const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+              const icon = theme.fg("accent", frame);
+              const progress = job.activity ? `, ${job.activity}` : "";
+              const badgeText = job.session?.model
+                ? `${job.session.model.id}:${job.session.thinkingLevel}`
+                : undefined;
+              const queueTag = job.completion === "queue" ? " Q" : "";
+              const badge = badgeText
+                ? ` [${badgeText}${queueTag}]`
+                : queueTag
+                  ? ` [${queueTag.trim()}]`
+                  : "";
+              const prefix = ` ${icon} `;
+              const meta = `${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
+              const availForCmd = Math.max(
+                0,
+                innerWidth - visibleWidth(prefix) - visibleWidth(meta),
+              );
+              const truncatedCmd =
+                visibleWidth(job.command) > availForCmd
+                  ? truncateToWidth(job.command, availForCmd)
+                  : job.command;
+              const content = `${prefix}${truncatedCmd}${meta}`;
+              const fill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(content)),
+              );
+              return (
+                bColor("│") +
+                truncateToWidth(content + fill, innerWidth) +
+                bColor("│")
+              );
+            });
+
+            if (overflow) {
+              const hidden = count - 2;
+              const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
+              const fill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(content)),
+              );
+              jobLines.push(
+                bColor("│") +
+                  truncateToWidth(content + fill, innerWidth) +
+                  bColor("│"),
+              );
+            }
+
+            const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
+            return [top, ...jobLines, bottom];
+          },
+          invalidate() {},
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+
+    if (!this.widgetTimer) {
+      this.widgetTimer = setInterval(() => this.syncStatus(), 100);
+    }
+  }
+
+  public guard(expectedGeneration: number) {
+    if (
+      this.shuttingDown ||
+      this.generation !== expectedGeneration ||
+      this.lifecycle.signal.aborted
+    )
+      throw new Error("Parent session ended during background setup");
+  }
+
+  public track(done: Promise<void>) {
+    this.pending.add(done);
+    void done.then(
+      () => this.pending.delete(done),
+      () => this.pending.delete(done),
+    );
+    return done;
+  }
+
+  public deliverCompletion(
+    message: string,
+    completion: "queue" | "continue",
+    expectedGeneration: number,
+  ) {
+    if (this.shuttingDown || this.generation !== expectedGeneration) return;
+    const active = this.currentCtx;
+    if (!active) return;
+    this.pi.sendMessage(
+      { customType: "pi-bg-result", content: message, display: true },
+      completion === "queue"
+        ? { deliverAs: "nextTurn" }
+        : { deliverAs: "steer", triggerTurn: active.isIdle() },
+    );
+  }
+
+  public killJob(pid: number): boolean {
+    const job = this.jobs.get(pid);
+    if (!job) return false;
+    job.stoppedManually = true;
+    job.controller.abort();
+    return true;
+  }
+
+  public currentRecord(job: BgJob): SubagentRecord {
+    if (!job.session || !job.record || !job.baseline)
+      throw new Error("currentRecord called on an incomplete job");
+    const stats = job.session.getSessionStats();
+    return {
+      ...job.record,
+      ...(job.session.model
+        ? {
+            model: `${job.session.model.provider}/${job.session.model.id}`,
+            thinking: job.session.thinkingLevel,
+          }
+        : {}),
+      turns: stats.assistantMessages - job.baseline.assistantMessages,
+      toolCount: stats.toolCalls - job.baseline.toolCalls,
+      toolFailures: job.toolFailures ?? 0,
+      usage: usageSince(stats, job.baseline),
+    };
+  }
+
+  public async manageJobs(ctx: ExtensionContext) {
+    if (this.jobs.size === 0)
+      return ctx.ui.notify("No background jobs running", "info");
+    const choice = await ctx.ui.select("Select job to stop:", [
+      "Cancel",
+      ...Array.from(
+        this.jobs.values(),
+        (job) =>
+          `[${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
+      ),
+    ]);
+    const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
+    if (choice !== "Cancel" && Number.isInteger(pid) && this.killJob(pid)) {
+      ctx.ui.notify(`Stopped background job ${pid}`, "info");
+      this.syncStatus(ctx);
+    }
+  }
+}

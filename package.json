@@ -15,6 +15,7 @@
   "author": "Bukutsu",
   "files": [
     "index.ts",
+    "src/**/*",
     "README.md",
     "CONTRIBUTING.md",
     "CHANGELOG.md",
