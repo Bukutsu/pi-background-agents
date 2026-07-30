@@ -22,13 +22,13 @@ Use `bg` for commands that should not block the conversation, such as test suite
 
 Parameters:
 
-| Name | Default | Purpose |
-| --- | --- | --- |
-| `action` | `"spawn"` | `spawn`, `status`, or `stop` |
-| `command` | | Shell command for `spawn` |
+| Name         | Default      | Purpose                                                             |
+| ------------ | ------------ | ------------------------------------------------------------------- |
+| `action`     | `"spawn"`    | `spawn`, `status`, or `stop`                                        |
+| `command`    |              | Shell command for `spawn`                                           |
 | `completion` | `"continue"` | `continue` wakes Pi when done; `queue` waits for the next user turn |
-| `pid` | | Job ID for `stop` |
-| `timeoutSec` | `600` | Timeout from 1 to 2,147,483 seconds |
+| `pid`        |              | Job ID for `stop`                                                   |
+| `timeoutSec` | `600`        | Timeout from 1 to 2,147,483 seconds                                 |
 
 Output is limited to Pi's standard 50 KB or 2,000 lines. Failed and truncated jobs keep a private log in a process-owned temporary directory.
 
@@ -48,21 +48,21 @@ The call returns immediately. Pi receives the child's final response when it fin
 
 Parameters:
 
-| Name | Default | Purpose |
-| --- | --- | --- |
-| `action` | `"spawn"` | `spawn`, `status`, `steer`, or `stop` |
-| `prompt` | | Task for a new or resumed session |
-| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status |
-| `sessionId` | New ID | Resume, inspect, steer, or stop a child |
-| `message` | | Guidance queued after the child's current turn |
-| `completion` | `"continue"` | `continue` wakes Pi when done; `queue` waits for the next user turn |
-| `model` | Parent or saved model | Model ID or provider/model specifier; an unresolvable model falls back to a default and emits a `Model fallback: …` notice |
-| `thinking` | Parent or saved level | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
-| `tools` | Parent tools | Comma-separated allowlist that can only reduce access |
-| `cwd` | Parent directory | Existing directory inside the parent project |
-| `worktree` | `false` | Create a branch and worktree for a new child |
-| `context` | `"project"` | `project` starts fresh; `fork` copies the current parent context |
-| `timeoutSec` | `600` | Child timeout |
+| Name          | Default                                         | Purpose                                                                                                                    |
+| ------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `action`      | `"spawn"`                                       | `spawn`, `status`, `steer`, or `stop`                                                                                      |
+| `prompt`      |                                                 | Task for a new or resumed session                                                                                          |
+| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status                                                                                                |
+| `sessionId`   | New ID                                          | Resume, inspect, steer, or stop a child                                                                                    |
+| `message`     |                                                 | Guidance queued after the child's current turn                                                                             |
+| `completion`  | `"continue"`                                    | `continue` wakes Pi when done; `queue` waits for the next user turn                                                        |
+| `model`       | Parent or saved model                           | Model ID or provider/model specifier; an unresolvable model falls back to a default and emits a `Model fallback: …` notice |
+| `thinking`    | Parent or saved level                           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                               |
+| `tools`       | Parent tools                                    | Comma-separated allowlist that can only reduce access                                                                      |
+| `cwd`         | Parent directory                                | Existing directory inside the parent project                                                                               |
+| `worktree`    | `false`                                         | Create a branch and worktree for a new child                                                                               |
+| `context`     | `"project"`                                     | `project` starts fresh; `fork` copies the current parent context                                                           |
+| `timeoutSec`  | `600`                                           | Child timeout                                                                                                              |
 
 ### Parallel edits
 
@@ -120,7 +120,7 @@ Child extensions use Pi's print-mode lifecycle. Parent reloads and session chang
 
 ## UI
 
-Running work appears above the editor. Subagent rows include a compact model and thinking label such as `gpt-5.6-sol:high` plus the current activity.
+Running work appears above the editor. Subagent rows include a compact model and thinking label such as `<provider>/<model>:<thinking>` plus the current activity.
 
 Use `/bg` to inspect or stop active jobs:
 
@@ -131,10 +131,10 @@ Use `/bg` to inspect or stop active jobs:
 
 ## Storage
 
-| Data | Location |
-| --- | --- |
-| Durable subagent sessions and index | `<agent-dir>/pi-bg` |
-| Generated worktrees | `<agent-dir>/pi-bg/worktrees` |
+| Data                                      | Location                               |
+| ----------------------------------------- | -------------------------------------- |
+| Durable subagent sessions and index       | `<agent-dir>/pi-bg`                    |
+| Generated worktrees                       | `<agent-dir>/pi-bg/worktrees`          |
 | Temporary shell and truncated-output logs | Process-owned directory under `<temp>` |
 
 Generated worktrees are not merged or removed automatically. Temporary logs may be cleared by the operating system. Child usage is reported by subagent status and completion messages, but it cannot be added retroactively to the already-finished parent tool call's usage total.

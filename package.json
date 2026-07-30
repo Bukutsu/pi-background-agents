@@ -1,6 +1,6 @@
 {
   "name": "pi-background-agents",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Background shell jobs and SDK-native subagents for Pi",
   "type": "module",
   "keywords": [
@@ -21,7 +21,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "tsc -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "tsc -p tsconfig.json && prettier --check .",
     "prepublishOnly": "npm run check"
   },
   "engines": {

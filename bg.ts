@@ -1,15 +1,67 @@
-import { buildSessionContext, createAgentSession, createLocalBashOperations, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, truncateTail } from "@earendil-works/pi-coding-agent";
-import type { AgentSession, ExtensionAPI, ExtensionContext, SessionStats } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  buildSessionContext,
+  createAgentSession,
+  createLocalBashOperations,
+  getAgentDir,
+  ModelRuntime,
+  resolveCliModel,
+  SessionManager,
+  truncateTail,
+} from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  ExtensionAPI,
+  ExtensionContext,
+  SessionStats,
+} from "@earendil-works/pi-coding-agent";
+import {
+  Box,
+  Markdown,
+  Text,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 
+function createMarkdownComponent(text: string, theme: any) {
+  const mdTheme = {
+    heading: (s: string) => theme.fg("toolTitle", theme.bold(s)),
+    link: (s: string) => theme.fg("accent", s),
+    linkUrl: (s: string) => theme.fg("dim", s),
+    code: (s: string) => theme.fg("accent", s),
+    codeBlock: (s: string) => theme.fg("toolOutput", s),
+    codeBlockBorder: (s: string) => theme.fg("dim", s),
+    quote: (s: string) => theme.fg("muted", s),
+    quoteBorder: (s: string) => theme.fg("dim", s),
+    hr: (s: string) => theme.fg("dim", s),
+    listBullet: (s: string) => theme.fg("accent", s),
+    bold: (s: string) => theme.bold(s),
+    italic: (s: string) => s,
+    strikethrough: (s: string) => s,
+    underline: (s: string) => s,
+  };
+  return new Markdown(text, 0, 0, mdTheme) as any;
+}
+
 let logDir: string | undefined;
-const getLogDir = () => logDir ??= mkdtempSync(join(tmpdir(), "pi-background-agents-"));
+const getLogDir = () =>
+  (logDir ??= mkdtempSync(join(tmpdir(), "pi-background-agents-")));
 const SUBAGENT_DIR = join(getAgentDir(), "pi-bg");
 const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
@@ -17,7 +69,8 @@ const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
 const SUBAGENT_WORKTREES = join(SUBAGENT_DIR, "worktrees");
 const LEGACY_SUBAGENT_INDEX = join(SUBAGENT_DIR, "index.json");
 
-type TerminalState = "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
+type TerminalState =
+  "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
 
 interface SubagentRecord {
   sessionId: string;
@@ -62,15 +115,25 @@ interface BgJob {
 function readIndex(): Record<string, SubagentRecord> {
   let legacy: Record<string, SubagentRecord> = {};
   if (existsSync(LEGACY_SUBAGENT_INDEX)) {
-    try { legacy = JSON.parse(readFileSync(LEGACY_SUBAGENT_INDEX, "utf8")); }
-    catch (error) { console.warn(`Ignoring invalid legacy subagent index:`, error); }
+    try {
+      legacy = JSON.parse(readFileSync(LEGACY_SUBAGENT_INDEX, "utf8"));
+    } catch (error) {
+      console.warn(`Ignoring invalid legacy subagent index:`, error);
+    }
   }
   if (!existsSync(SUBAGENT_INDEX)) return legacy;
   for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     try {
-      const record = JSON.parse(readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8")) as SubagentRecord;
-      if (!record || typeof record.sessionId !== "string" || !/^[a-zA-Z0-9-]+$/.test(record.sessionId)) throw new Error("invalid sessionId");
+      const record = JSON.parse(
+        readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8"),
+      ) as SubagentRecord;
+      if (
+        !record ||
+        typeof record.sessionId !== "string" ||
+        !/^[a-zA-Z0-9-]+$/.test(record.sessionId)
+      )
+        throw new Error("invalid sessionId");
       legacy[record.sessionId] = record;
     } catch (error) {
       console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
@@ -80,11 +143,15 @@ function readIndex(): Record<string, SubagentRecord> {
 }
 
 function saveRecord(record: SubagentRecord) {
-  if (!/^[a-zA-Z0-9-]+$/.test(record.sessionId)) throw new Error(`Invalid subagent session ID: ${record.sessionId}`);
+  if (!/^[a-zA-Z0-9-]+$/.test(record.sessionId))
+    throw new Error(`Invalid subagent session ID: ${record.sessionId}`);
   mkdirSync(SUBAGENT_INDEX, { recursive: true, mode: 0o700 });
   const target = join(SUBAGENT_INDEX, `${record.sessionId}.json`);
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flush: true });
+  writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
+    mode: 0o600,
+    flush: true,
+  });
   renameSync(temporary, target);
 }
 
@@ -101,36 +168,66 @@ function usageSince(current: SessionStats, baseline: SessionStats) {
 
 function sanitizeForkMessages(ctx: ExtensionContext) {
   const messages = buildSessionContext(ctx.sessionManager.getBranch()).messages;
-  const resultIds = new Set(messages.flatMap((message) => message.role === "toolResult" && !["bg", "subagent"].includes(message.toolName) ? [message.toolCallId] : []));
+  const resultIds = new Set(
+    messages.flatMap((message) =>
+      message.role === "toolResult" &&
+      !["bg", "subagent"].includes(message.toolName)
+        ? [message.toolCallId]
+        : [],
+    ),
+  );
   const callIds = new Set<string>();
   const sanitized: any[] = [];
   for (const message of messages) {
-    if (message.role === "custom" && message.customType === "pi-bg-result") continue;
-    if (message.role === "compactionSummary" || message.role === "branchSummary") {
-      sanitized.push({ role: "user", content: `Parent conversation summary:\n${message.summary}`, timestamp: message.timestamp });
+    if (message.role === "custom" && message.customType === "pi-bg-result")
+      continue;
+    if (
+      message.role === "compactionSummary" ||
+      message.role === "branchSummary"
+    ) {
+      sanitized.push({
+        role: "user",
+        content: `Parent conversation summary:\n${message.summary}`,
+        timestamp: message.timestamp,
+      });
       continue;
     }
     if (message.role === "assistant") {
       if (!Array.isArray(message.content)) continue;
       const content = message.content.filter((part) => {
         if (part.type !== "toolCall") return true;
-        if (["bg", "subagent"].includes(part.name) || !resultIds.has(part.id)) return false;
+        if (["bg", "subagent"].includes(part.name) || !resultIds.has(part.id))
+          return false;
         callIds.add(part.id);
         return true;
       });
-      if (content.length) sanitized.push({
-        ...message,
-        content,
-        usage: {
-          ...message.usage,
-          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, totalTokens: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        },
-      });
+      if (content.length)
+        sanitized.push({
+          ...message,
+          content,
+          usage: {
+            ...message.usage,
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cacheWrite1h: 0,
+            reasoning: 0,
+            totalTokens: 0,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+        });
       continue;
     }
     if (message.role === "toolResult") {
-      if (callIds.has(message.toolCallId)) sanitized.push({ ...message, usage: undefined });
+      if (callIds.has(message.toolCallId))
+        sanitized.push({ ...message, usage: undefined });
       continue;
     }
     sanitized.push(message);
@@ -149,7 +246,8 @@ function processIsAlive(pid?: number) {
 }
 
 function acquireSessionLock(sessionId: string) {
-  if (!/^[a-zA-Z0-9-]+$/.test(sessionId)) throw new Error(`Invalid subagent session ID: ${sessionId}`);
+  if (!/^[a-zA-Z0-9-]+$/.test(sessionId))
+    throw new Error(`Invalid subagent session ID: ${sessionId}`);
   mkdirSync(SUBAGENT_LOCKS, { recursive: true, mode: 0o700 });
   const lock = join(SUBAGENT_LOCKS, sessionId);
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -161,13 +259,18 @@ function acquireSessionLock(sessionId: string) {
       if (error?.code !== "EEXIST") throw error;
       try {
         const owner = Number(readFileSync(join(lock, "owner"), "utf8"));
-        if (processIsAlive(owner)) throw new Error(`Subagent session ${sessionId} is already running in process ${owner}`);
+        if (processIsAlive(owner))
+          throw new Error(
+            `Subagent session ${sessionId} is already running in process ${owner}`,
+          );
         const stale = `${lock}.stale-${randomUUID()}`;
         renameSync(lock, stale);
         rmSync(stale, { recursive: true, force: true });
       } catch (staleError: any) {
         if (staleError?.code === "ENOENT") {
-          try { rmSync(lock, { recursive: true, force: true }); } catch {}
+          try {
+            rmSync(lock, { recursive: true, force: true });
+          } catch {}
         } else throw staleError;
       }
     }
@@ -175,8 +278,18 @@ function acquireSessionLock(sessionId: string) {
   throw new Error(`Could not acquire subagent session lock: ${sessionId}`);
 }
 
-function getSubagentHeading(error?: string, timedOut = false, cancelled = false) {
-  return timedOut ? "Background subagent timed out" : cancelled ? "Background subagent was stopped" : error ? "Background subagent failed" : "Background subagent finished";
+function getSubagentHeading(
+  error?: string,
+  timedOut = false,
+  cancelled = false,
+) {
+  return timedOut
+    ? "Background subagent timed out"
+    : cancelled
+      ? "Background subagent was stopped"
+      : error
+        ? "Background subagent failed"
+        : "Background subagent finished";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -197,6 +310,50 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  pi.registerMessageRenderer("pi-bg-result", (message, options, theme) => {
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content
+              .map((c) => (c.type === "text" ? c.text : ""))
+              .join("")
+          : "";
+    if (!text.trim()) return undefined;
+
+    const lines = text.trim().split("\n");
+    const firstLine = lines[0] ?? "";
+    const isError =
+      firstLine.toLowerCase().includes("failed") ||
+      firstLine.toLowerCase().includes("timed out") ||
+      firstLine.toLowerCase().includes("stopped");
+
+    const bgFn = isError
+      ? (s: string) => theme.bg("toolErrorBg", s)
+      : (s: string) => theme.bg("toolSuccessBg", s);
+
+    const titleColor = isError ? "error" : "accent";
+    const headerText = theme.fg(titleColor, theme.bold(firstLine));
+
+    const bodyText = lines.slice(1).join("\n").trim();
+    const box = new Box(1, 1, bgFn);
+    box.addChild(new Text(headerText, 0, 0));
+
+    if (bodyText) {
+      if (options.expanded) {
+        box.addChild(createMarkdownComponent(bodyText, theme));
+      } else {
+        const bodyLines = bodyText.split("\n");
+        const preview = bodyLines.slice(0, 8).join("\n");
+        const hidden = Math.max(0, bodyLines.length - 8);
+        const hint =
+          hidden > 0 ? `\n\n_${hidden} more lines (expand to view)_` : "";
+        box.addChild(createMarkdownComponent(preview + hint, theme));
+      }
+    }
+    return box as any;
+  });
+
   const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let widgetTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -215,47 +372,76 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    active.ui.setWidget("bg-subagents", (_tui, theme) => {
-      const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
-      const bColor = (str: string) => theme.fg("dim", str);
-      return {
-        render(width: number) {
-          const count = activeJobs.length;
-          const innerWidth = Math.max(10, width - 2);
-          const title = ` Background Jobs (${count}) `;
-          const rightHint = " /bg ";
-          const topFillLen = Math.max(0, innerWidth - visibleWidth(title) - visibleWidth(rightHint));
-          const top = bColor("╭") + theme.fg("accent", theme.bold(title)) + bColor("─".repeat(topFillLen)) + bColor(rightHint + "╮");
+    active.ui.setWidget(
+      "bg-subagents",
+      (_tui, theme) => {
+        const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
+        const bColor = (str: string) => theme.fg("dim", str);
+        return {
+          render(width: number) {
+            const count = activeJobs.length;
+            const innerWidth = Math.max(10, width - 2);
+            const title = ` Background Jobs (${count}) `;
+            const rightHint = " /bg ";
+            const topFillLen = Math.max(
+              0,
+              innerWidth - visibleWidth(title) - visibleWidth(rightHint),
+            );
+            const top =
+              bColor("╭") +
+              theme.fg("accent", theme.bold(title)) +
+              bColor("─".repeat(topFillLen)) +
+              bColor(rightHint + "╮");
 
-          const maxVisible = 3;
-          const overflow = count > maxVisible;
-          const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
+            const maxVisible = 3;
+            const overflow = count > maxVisible;
+            const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
 
-          const jobLines = visibleJobs.map((job) => {
-            const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-            const icon = theme.fg("accent", frame);
-            const progress = job.activity ? `, ${job.activity}` : "";
-            const badgeText = job.session?.model ? `${job.session.model.id}:${job.session.thinkingLevel}` : undefined;
-            const queueTag = job.completion === "queue" ? " Q" : "";
-            const badge = badgeText ? ` [${badgeText}${queueTag}]` : queueTag ? ` [${queueTag.trim()}]` : "";
-            const content = ` ${icon} ${job.command}${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
-            const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-            return bColor("│") + truncateToWidth(content + fill, innerWidth) + bColor("│");
-          });
+            const jobLines = visibleJobs.map((job) => {
+              const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+              const icon = theme.fg("accent", frame);
+              const progress = job.activity ? `, ${job.activity}` : "";
+              const badgeText = job.session?.model
+                ? `${job.session.model.id}:${job.session.thinkingLevel}`
+                : undefined;
+              const queueTag = job.completion === "queue" ? " Q" : "";
+              const badge = badgeText
+                ? ` [${badgeText}${queueTag}]`
+                : queueTag
+                  ? ` [${queueTag.trim()}]`
+                  : "";
+              const content = ` ${icon} ${job.command}${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
+              const fill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(content)),
+              );
+              return (
+                bColor("│") +
+                truncateToWidth(content + fill, innerWidth) +
+                bColor("│")
+              );
+            });
 
-          if (overflow) {
-            const hidden = count - 2;
-            const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
-            const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-            jobLines.push(bColor("│") + truncateToWidth(content + fill, innerWidth) + bColor("│"));
-          }
+            if (overflow) {
+              const hidden = count - 2;
+              const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
+              const fill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(content)),
+              );
+              jobLines.push(
+                bColor("│") +
+                  truncateToWidth(content + fill, innerWidth) +
+                  bColor("│"),
+              );
+            }
 
-          const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-          return [top, ...jobLines, bottom];
-        },
-        invalidate() {},
-      };
-    }, { placement: "aboveEditor" });
+            const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
+            return [top, ...jobLines, bottom];
+          },
+          invalidate() {},
+        };
+      },
+      { placement: "aboveEditor" },
+    );
 
     if (!widgetTimer) {
       widgetTimer = setInterval(() => syncStatus(), 100);
@@ -263,22 +449,37 @@ export default function (pi: ExtensionAPI) {
   }
 
   function guard(expectedGeneration: number) {
-    if (shuttingDown || generation !== expectedGeneration || lifecycle.signal.aborted) throw new Error("Parent session ended during background setup");
+    if (
+      shuttingDown ||
+      generation !== expectedGeneration ||
+      lifecycle.signal.aborted
+    )
+      throw new Error("Parent session ended during background setup");
   }
 
   function track(done: Promise<void>) {
     pending.add(done);
-    void done.then(() => pending.delete(done), () => pending.delete(done));
+    void done.then(
+      () => pending.delete(done),
+      () => pending.delete(done),
+    );
     return done;
   }
 
-  function deliverCompletion(message: string, ctx: ExtensionContext | undefined, completion: "queue" | "continue", expectedGeneration: number) {
+  function deliverCompletion(
+    message: string,
+    ctx: ExtensionContext | undefined,
+    completion: "queue" | "continue",
+    expectedGeneration: number,
+  ) {
     if (shuttingDown || generation !== expectedGeneration) return;
     const active = currentCtx;
     if (!active) return;
     pi.sendMessage(
       { customType: "pi-bg-result", content: message, display: true },
-      completion === "queue" ? { deliverAs: "nextTurn" } : { deliverAs: "steer", triggerTurn: active.isIdle() },
+      completion === "queue"
+        ? { deliverAs: "nextTurn" }
+        : { deliverAs: "steer", triggerTurn: active.isIdle() },
     );
   }
 
@@ -294,52 +495,105 @@ export default function (pi: ExtensionAPI) {
     const root = realpathSync(parent);
     const target = realpathSync(resolve(root, requested?.trim() || "."));
     const rel = relative(root, target);
-    if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
-      throw new Error(`cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`);
+    if (
+      rel === ".." ||
+      rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+    ) {
+      throw new Error(
+        `cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`,
+      );
     }
-    if (!statSync(target).isDirectory()) throw new Error(`cwd is not a directory: ${target}`);
+    if (!statSync(target).isDirectory())
+      throw new Error(`cwd is not a directory: ${target}`);
     return target;
   }
 
-  function runBgProcess(command: string, timeoutSec: number, ctx: ExtensionContext, completion: "queue" | "continue" = "continue") {
+  function runBgProcess(
+    command: string,
+    timeoutSec: number,
+    ctx: ExtensionContext,
+    completion: "queue" | "continue" = "continue",
+  ) {
     const expectedGeneration = generation;
-    const shownCommand = command.length > 120 ? `${command.slice(0, 117)}...` : command;
+    const shownCommand =
+      command.length > 120 ? `${command.slice(0, 117)}...` : command;
     const pid = nextVirtualPid--;
     const controller = new AbortController();
     let output = "";
     let outputTruncated = false;
-    const job: BgJob = { pid, command: shownCommand, startedAt: Date.now(), controller, kind: "shell", completion };
+    const job: BgJob = {
+      pid,
+      command: shownCommand,
+      startedAt: Date.now(),
+      controller,
+      kind: "shell",
+      completion,
+    };
     jobs.set(pid, job);
     syncStatus(ctx);
 
-    job.done = track(createLocalBashOperations().exec(command, ctx.cwd, {
-      signal: controller.signal,
-      timeout: timeoutSec,
-      onData(data) {
-        const truncated = truncateTail(output + data.toString());
-        outputTruncated ||= truncated.truncated;
-        output = truncated.content;
-      },
-    }).then(({ exitCode }) => finish(exitCode)).catch((error) => finish(null, error)));
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PI_SESSION_ID: ctx.sessionManager.getSessionId(),
+      ...(ctx.sessionManager.getSessionFile()
+        ? { PI_SESSION_FILE: ctx.sessionManager.getSessionFile() }
+        : {}),
+      ...(ctx.model
+        ? { PI_PROVIDER: ctx.model.provider, PI_MODEL: ctx.model.id }
+        : {}),
+      ...(ctx.thinkingLevel ? { PI_REASONING_LEVEL: ctx.thinkingLevel } : {}),
+    };
+
+    job.done = track(
+      createLocalBashOperations()
+        .exec(command, ctx.cwd, {
+          signal: controller.signal,
+          timeout: timeoutSec,
+          env,
+          onData(data) {
+            const truncated = truncateTail(output + data.toString());
+            outputTruncated ||= truncated.truncated;
+            output = truncated.content;
+          },
+        })
+        .then(({ exitCode }) => finish(exitCode))
+        .catch((error) => finish(null, error)),
+    );
 
     function finish(exitCode: number | null, error?: unknown) {
-      const message = error instanceof Error ? error.message : error ? String(error) : "";
+      const message =
+        error instanceof Error ? error.message : error ? String(error) : "";
       const timedOut = message.startsWith("timeout:");
       const cancelled = controller.signal.aborted && !timedOut;
       const failed = Boolean(error) && !cancelled && !timedOut;
       const content = output.trim();
-      const keepLog = cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
+      const keepLog =
+        cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
       const logFile = keepLog ? join(getLogDir(), `${randomUUID()}.log`) : "";
       if (keepLog) {
-        try { writeFileSync(logFile, content || message, { mode: 0o600 }); }
-        catch (logError) { console.warn(`Could not save background task log:`, logError); }
+        try {
+          writeFileSync(logFile, content || message, { mode: 0o600 });
+        } catch (logError) {
+          console.warn(`Could not save background task log:`, logError);
+        }
       }
-      const heading = timedOut ? `Background task timed out after ${timeoutSec} seconds`
-        : cancelled ? "Background task was stopped"
-        : failed ? "Background task could not start"
-        : exitCode === 0 ? "Background task finished" : "Background task failed";
-      const result = content ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Retained tail: ${logFile}` : ""}` : "";
-      const reason = failed ? `\n\nReason: ${message}` : exitCode ? `\n\nExit code: ${exitCode}` : "";
+      const heading = timedOut
+        ? `Background task timed out after ${timeoutSec} seconds`
+        : cancelled
+          ? "Background task was stopped"
+          : failed
+            ? "Background task could not start"
+            : exitCode === 0
+              ? "Background task finished"
+              : "Background task failed";
+      const result = content
+        ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Retained tail: ${logFile}` : ""}`
+        : "";
+      const reason = failed
+        ? `\n\nReason: ${message}`
+        : exitCode
+          ? `\n\nExit code: ${exitCode}`
+          : "";
       deliverCompletion(
         `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
         ctx,
@@ -351,7 +605,12 @@ export default function (pi: ExtensionAPI) {
     }
 
     return {
-      content: [{ type: "text" as const, text: `Started shell job ${pid}: ${shownCommand}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, check /bg for the saved output." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use /bg to view or stop the task.` }],
+      content: [
+        {
+          type: "text" as const,
+          text: `Started shell job ${pid}: ${shownCommand}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, check /bg for the saved output." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use /bg to view or stop the task.`,
+        },
+      ],
       details: { pid },
     };
   }
@@ -371,11 +630,19 @@ export default function (pi: ExtensionAPI) {
     for (const [pid, job] of jobs) {
       try {
         if (job.record) {
-          job.record = { ...currentRecord(job), state: "interrupted", updatedAt: new Date().toISOString(), durationSec: Math.round((Date.now() - job.startedAt) / 1000) };
+          job.record = {
+            ...currentRecord(job),
+            state: "interrupted",
+            updatedAt: new Date().toISOString(),
+            durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+          };
           saveRecord(job.record);
         }
       } catch (error) {
-        console.warn(`Could not persist interrupted background job ${pid}:`, error);
+        console.warn(
+          `Could not persist interrupted background job ${pid}:`,
+          error,
+        );
       } finally {
         killJob(pid);
       }
@@ -388,11 +655,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   async function manageJobs(ctx: ExtensionContext) {
-    if (jobs.size === 0) return ctx.ui.notify("No background jobs running", "info");
+    if (jobs.size === 0)
+      return ctx.ui.notify("No background jobs running", "info");
     const choice = await ctx.ui.select("Select job to stop:", [
       "Cancel",
-      ...Array.from(jobs.values(), (job) =>
-        `[${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`
+      ...Array.from(
+        jobs.values(),
+        (job) =>
+          `[${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
       ),
     ]);
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
@@ -405,8 +675,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("bg", {
     description: "List and manage background jobs",
     getArgumentCompletions: (prefix) => {
-      const items = Array.from(jobs.values(), (job) => ({ value: `kill ${job.pid}`, label: `kill ${job.pid}`, description: job.command }))
-        .filter((item) => item.value.startsWith(prefix));
+      const items = Array.from(jobs.values(), (job) => ({
+        value: `kill ${job.pid}`,
+        label: `kill ${job.pid}`,
+        description: job.command,
+      })).filter((item) => item.value.startsWith(prefix));
       return items.length ? items : null;
     },
     handler: async (args, ctx) => {
@@ -435,35 +708,133 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg",
     label: "Background",
-    description: "Run, inspect, or stop long-running shell commands without blocking the agent session.",
-    promptSnippet: "Run, inspect, or stop long-running shell commands without blocking the agent session.",
+    description:
+      "Run, inspect, or stop long-running shell commands without blocking the agent session.",
+    promptSnippet:
+      "Run, inspect, or stop long-running shell commands without blocking the agent session.",
     promptGuidelines: [
       "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
       "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
       "After starting bg, continue work immediately; never wait, sleep, or poll for completion.",
     ],
     parameters: Type.Object({
-      action: Type.Optional(StringEnum(["spawn", "status", "stop"] as const, { description: "Action (default: spawn)" })),
-      command: Type.Optional(Type.String({ description: "Shell command for spawn" })),
-      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next message" })),
+      action: Type.Optional(
+        StringEnum(["spawn", "status", "stop"] as const, {
+          description: "Action (default: spawn)",
+        }),
+      ),
+      command: Type.Optional(
+        Type.String({ description: "Shell command for spawn" }),
+      ),
+      completion: Type.Optional(
+        StringEnum(["queue", "continue"] as const, {
+          description:
+            "continue wakes the parent turn automatically when ready (default); queue waits for user's next message",
+        }),
+      ),
       pid: Type.Optional(Type.Number({ description: "Job ID for stop" })),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
+      timeoutSec: Type.Optional(
+        Type.Number({
+          minimum: 1,
+          maximum: 2_147_483,
+          description: "Timeout in seconds (default: 600)",
+        }),
+      ),
     }),
-    async execute(id, { action = "spawn", command, completion = "continue", pid, timeoutSec = 600 }, _sig, _up, ctx) {
+    async execute(
+      id,
+      {
+        action = "spawn",
+        command,
+        completion = "continue",
+        pid,
+        timeoutSec = 600,
+      },
+      _sig,
+      _up,
+      ctx,
+    ) {
       currentCtx = ctx;
       if (action === "status") {
-        const listed = Array.from(jobs.values()).filter((job) => job.kind === "shell");
-        const text = listed.map((job) => `${job.pid} running ${job.command} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`);
-        return { content: [{ type: "text" as const, text: text.join("\n") || "No shell jobs." }], details: {} };
+        const listed = Array.from(jobs.values()).filter(
+          (job) => job.kind === "shell",
+        );
+        if (listed.length === 0) {
+          return {
+            content: [
+              { type: "text" as const, text: "No shell jobs running." },
+            ],
+            details: {},
+          };
+        }
+        const rows = listed.map((job) => {
+          const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+          return `| [${job.pid}] | \`${job.command}\` | ${elapsed}s |`;
+        });
+        const text = `| PID | Command | Elapsed |\n|---|---|---|\n${rows.join("\n")}`;
+        return {
+          content: [{ type: "text" as const, text }],
+          details: {},
+        };
       }
       const job = pid === undefined ? undefined : jobs.get(pid);
       if (action === "stop") {
-        if (!job || job.kind !== "shell") throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
+        if (!job || job.kind !== "shell")
+          throw new Error(`Shell job not found: ${pid ?? "missing pid"}`);
         job.controller.abort();
-        return { content: [{ type: "text" as const, text: `Stopped shell job ${pid}` }], details: { pid } };
+        return {
+          content: [
+            { type: "text" as const, text: `Stopped shell job ${pid}` },
+          ],
+          details: { pid },
+        };
       }
       if (!command?.trim()) throw new Error("command is required for spawn");
       return runBgProcess(command.trim(), timeoutSec, ctx, completion);
+    },
+    renderCall(args, theme, _context) {
+      const action = args.action ?? "spawn";
+      if (action === "status")
+        return new Text(
+          theme.fg("toolTitle", theme.bold("Background jobs status")),
+          0,
+          0,
+        ) as any;
+      if (action === "stop")
+        return new Text(
+          theme.fg(
+            "toolTitle",
+            theme.bold(`Stop background job ${args.pid ?? ""}`),
+          ),
+          0,
+          0,
+        ) as any;
+      const cmd = args.command || "...";
+      const completionTag =
+        args.completion === "queue" ? theme.fg("dim", " [queue]") : "";
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold(`$ bg: ${cmd}`))}${completionTag}`,
+        0,
+        0,
+      ) as any;
+    },
+    renderResult(result, options, theme, context) {
+      const text =
+        result.content
+          ?.map((c) => (c.type === "text" ? c.text : ""))
+          .filter(Boolean)
+          .join("\n")
+          .trim() || "";
+      if (!text) return new Text("", 0, 0) as any;
+      if (options.expanded) {
+        return createMarkdownComponent(text, theme);
+      }
+      const lines = text.split("\n");
+      const preview = lines.slice(0, 8).join("\n");
+      const hidden = lines.length - 8;
+      const hint =
+        hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
+      return createMarkdownComponent(preview + hint, theme);
     },
   });
 
@@ -471,12 +842,62 @@ export default function (pi: ExtensionAPI) {
     const stats = job.session!.getSessionStats();
     return {
       ...job.record!,
-      ...(job.session?.model ? { model: `${job.session.model.provider}/${job.session.model.id}`, thinking: job.session.thinkingLevel } : {}),
+      ...(job.session?.model
+        ? {
+            model: `${job.session.model.provider}/${job.session.model.id}`,
+            thinking: job.session.thinkingLevel,
+          }
+        : {}),
       turns: stats.assistantMessages - job.baseline!.assistantMessages,
       toolCount: stats.toolCalls - job.baseline!.toolCalls,
       toolFailures: job.toolFailures ?? 0,
       usage: usageSince(stats, job.baseline!),
     };
+  }
+
+  function formatSubagentStatusTable(
+    sessions: Array<ReturnType<typeof statusDetails>>,
+  ) {
+    if (sessions.length === 0) return "No matching subagent sessions.";
+
+    const formatState = (state: string) => {
+      switch (state) {
+        case "running":
+          return "running";
+        case "finished":
+          return "finished";
+        case "stopped":
+          return "stopped";
+        case "failed":
+          return "failed";
+        case "timed-out":
+          return "timed out";
+        case "interrupted":
+          return "interrupted";
+        default:
+          return state;
+      }
+    };
+
+    const rows = sessions.map((s) => {
+      const duration =
+        s.elapsedSec !== undefined
+          ? `${s.elapsedSec}s`
+          : s.durationSec !== undefined
+            ? `${s.durationSec}s`
+            : "-";
+      const costText = s.usage.cost ? `$${s.usage.cost.toFixed(4)}` : "$0.0000";
+      const label =
+        s.label.length > 40 ? `${s.label.slice(0, 37)}...` : s.label;
+      const shortId = s.sessionId.slice(0, 8);
+      const activityCol =
+        s.activity ??
+        `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`;
+      return `| ${formatState(s.state)} | ${label} | \`${s.model}:${s.thinking}\` | ${activityCol} | ${duration} | ${costText} | \`${shortId}\` |`;
+    });
+
+    const header = `| Status | Task | Model | Activity | Duration | Cost | Session ID |\n|---|---|---|---|---|---|---|`;
+    return `${header}\n${rows.join("\n")}`;
   }
 
   function statusDetails(record: SubagentRecord, job?: BgJob) {
@@ -485,36 +906,48 @@ export default function (pi: ExtensionAPI) {
     return {
       ...details,
       ...(job?.activity ? { activity: job.activity } : {}),
-      ...(job ? { elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) } : {}),
+      ...(job
+        ? { elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) }
+        : {}),
     };
   }
 
-  function statusText(item: ReturnType<typeof statusDetails>) {
-    const usage = item.usage;
-    const timing = item.elapsedSec !== undefined ? `${item.elapsedSec}s elapsed` : item.durationSec !== undefined ? `${item.durationSec}s` : "duration unavailable";
-    return `${item.sessionId} ${item.state} ${JSON.stringify(item.label)} | ${item.model}:${item.thinking} | ${item.cwd} | activity:${item.activity ?? "-"} | inherited:[${item.inheritedTools.join(",")}] turns:${item.turns} tools:${item.toolCount} failures:${item.toolFailures} | in:${usage.input} out:${usage.output} R:${usage.cacheRead} W:${usage.cacheWrite} $${usage.cost.toFixed(4)} | ${timing} | ${item.sessionFile}${item.branch ? ` | branch:${item.branch}` : ""}`;
-  }
-
   async function createWorktree(ctx: ExtensionContext, signal?: AbortSignal) {
-    const rootResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: ctx.cwd, signal });
-    if (rootResult.code !== 0) throw new Error(`worktree:true requires a Git worktree: ${rootResult.stderr.trim() || ctx.cwd}`);
+    const rootResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], {
+      cwd: ctx.cwd,
+      signal,
+    });
+    if (rootResult.code !== 0)
+      throw new Error(
+        `worktree:true requires a Git worktree: ${rootResult.stderr.trim() || ctx.cwd}`,
+      );
     const root = realpathSync(rootResult.stdout.trim());
     const id = randomUUID().slice(0, 8);
     const branch = `pi-background-agents/${Date.now()}-${id}`;
     mkdirSync(SUBAGENT_WORKTREES, { recursive: true, mode: 0o700 });
     const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
-    const result = await pi.exec("git", ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, path], { cwd: root, signal });
-    if (result.code !== 0) throw new Error(`Could not create worktree: ${result.stderr.trim() || result.stdout.trim()}`);
+    const result = await pi.exec(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, path],
+      { cwd: root, signal },
+    );
+    if (result.code !== 0)
+      throw new Error(
+        `Could not create worktree: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
     return { branch, path: realpathSync(path) };
   }
 
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Delegate exploration or research tasks to a background subagent.",
-    promptSnippet: "Delegate exploration or research tasks to a background subagent.",
+    description:
+      "Delegate exploration or research tasks to a background subagent.",
+    promptSnippet:
+      "Delegate exploration or research tasks to a background subagent.",
     promptGuidelines: [
       "Use subagent for multi-step sub-tasks, background research, code audits, refactoring, or sub-problems to keep main context uncluttered.",
+      "Choose appropriate models for subagents based on task requirements (e.g. fast/inexpensive models for simple searches or checks, strong reasoning models with thinking for complex refactoring).",
       "Provide complete and self-contained instructions in prompt; use context:fork only when the child needs the parent's current conversation.",
       "Reuse sessionId from an earlier subagent result to continue its saved model, thinking level, cwd, and conversation.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
@@ -523,71 +956,220 @@ export default function (pi: ExtensionAPI) {
       "After starting subagent, continue work immediately; never wait, sleep, or poll action:status for completion. Results arrive automatically.",
     ],
     parameters: Type.Object({
-      action: Type.Optional(StringEnum(["spawn", "status", "steer", "stop"] as const, { description: "Action (default: spawn)" })),
+      action: Type.Optional(
+        StringEnum(["spawn", "status", "steer", "stop"] as const, {
+          description: "Action (default: spawn)",
+        }),
+      ),
       prompt: Type.Optional(Type.String({ description: "Task for spawn" })),
-      description: Type.Optional(Type.String({ description: "Short job label" })),
-      sessionId: Type.Optional(Type.String({ description: "Durable session identity to resume, inspect, steer, or stop" })),
-      message: Type.Optional(Type.String({ description: "Message queued after the running child's current turn" })),
-      completion: Type.Optional(StringEnum(["queue", "continue"] as const, { description: "continue wakes the parent turn automatically when ready (default); queue waits for user's next message" })),
-      model: Type.Optional(Type.String({ description: "Preferred model; omitted on resume to restore the saved model" })),
-      thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, { description: "Thinking level; omitted on resume to restore the saved level" })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist; can only narrow the parent's active tools" })),
-      cwd: Type.Optional(Type.String({ description: "Existing working directory; cannot be combined with worktree:true" })),
-      worktree: Type.Optional(Type.Boolean({ description: "Create a unique persistent Git branch/worktree for a new session" })),
-      context: Type.Optional(StringEnum(["project", "fork"] as const, { description: "project starts fresh with project resources (default); fork seeds sanitized parent conversation" })),
-      timeoutSec: Type.Optional(Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds (default: 600)" })),
+      description: Type.Optional(
+        Type.String({ description: "Short job label" }),
+      ),
+      sessionId: Type.Optional(
+        Type.String({
+          description:
+            "Durable session identity to resume, inspect, steer, or stop",
+        }),
+      ),
+      message: Type.Optional(
+        Type.String({
+          description: "Message queued after the running child's current turn",
+        }),
+      ),
+      completion: Type.Optional(
+        StringEnum(["queue", "continue"] as const, {
+          description:
+            "continue wakes the parent turn automatically when ready (default); queue waits for user's next message",
+        }),
+      ),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Preferred model; omitted on resume to restore the saved model",
+        }),
+      ),
+      thinking: Type.Optional(
+        StringEnum(
+          ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const,
+          {
+            description:
+              "Thinking level; omitted on resume to restore the saved level",
+          },
+        ),
+      ),
+      tools: Type.Optional(
+        Type.String({
+          description:
+            "Comma-separated tool allowlist; can only narrow the parent's active tools",
+        }),
+      ),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Existing working directory; cannot be combined with worktree:true",
+        }),
+      ),
+      worktree: Type.Optional(
+        Type.Boolean({
+          description:
+            "Create a unique persistent Git branch/worktree for a new session",
+        }),
+      ),
+      context: Type.Optional(
+        StringEnum(["project", "fork"] as const, {
+          description:
+            "project starts fresh with project resources (default); fork seeds sanitized parent conversation",
+        }),
+      ),
+      timeoutSec: Type.Optional(
+        Type.Number({
+          minimum: 1,
+          maximum: 2_147_483,
+          description: "Timeout in seconds (default: 600)",
+        }),
+      ),
     }),
-    async execute(_id, { action = "spawn", prompt, description, sessionId, message, completion = "continue", model, thinking, tools, cwd, worktree = false, context = "project", timeoutSec = 600 }, signal, _up, ctx) {
+    async execute(
+      _id,
+      {
+        action = "spawn",
+        prompt,
+        description,
+        sessionId,
+        message,
+        completion = "continue",
+        model,
+        thinking,
+        tools,
+        cwd,
+        worktree = false,
+        context = "project",
+        timeoutSec = 600,
+      },
+      signal,
+      _up,
+      ctx,
+    ) {
       currentCtx = ctx;
       const requestedId = sessionId?.trim();
-      const matching = requestedId ? Array.from(jobs.values()).find((job) => job.kind === "subagent" && job.sessionId === requestedId) : undefined;
+      const matching = requestedId
+        ? Array.from(jobs.values()).find(
+            (job) => job.kind === "subagent" && job.sessionId === requestedId,
+          )
+        : undefined;
       if (action === "status") {
-        const active = new Map(Array.from(jobs.values()).filter((job) => job.kind === "subagent" && job.record).map((job) => [job.sessionId!, job]));
+        const active = new Map(
+          Array.from(jobs.values())
+            .filter((job) => job.kind === "subagent" && job.record)
+            .map((job) => [job.sessionId!, job]),
+        );
         const durable = readIndex();
         const records = requestedId
-          ? (active.get(requestedId)?.record || durable[requestedId] ? [active.get(requestedId)?.record ?? durable[requestedId]] : [])
-          : [...Array.from(active.values(), (job) => job.record!), ...Object.values(durable).filter((record) => !active.has(record.sessionId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 50)];
-        const sessions = records.map((record) => statusDetails(record, active.get(record.sessionId)));
-        return { content: [{ type: "text" as const, text: sessions.map(statusText).join("\n") || "No matching subagent sessions." }], details: { sessions } };
+          ? active.get(requestedId)?.record || durable[requestedId]
+            ? [active.get(requestedId)?.record ?? durable[requestedId]]
+            : []
+          : [
+              ...Array.from(active.values(), (job) => job.record!),
+              ...Object.values(durable)
+                .filter((record) => !active.has(record.sessionId))
+                .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+                .slice(0, 50),
+            ];
+        const sessions = records.map((record) =>
+          statusDetails(record, active.get(record.sessionId)),
+        );
+        const text = formatSubagentStatusTable(sessions);
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { sessions },
+        };
       }
       if (action === "stop") {
-        if (!matching) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
+        if (!matching)
+          throw new Error(
+            `Running subagent not found: ${requestedId || "missing sessionId"}`,
+          );
         killJob(matching.pid);
         syncStatus(ctx);
-        return { content: [{ type: "text" as const, text: `Stopping subagent ${matching.sessionId}` }], details: { sessionId: matching.sessionId } };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Stopping subagent ${matching.sessionId}`,
+            },
+          ],
+          details: { sessionId: matching.sessionId },
+        };
       }
       if (action === "steer") {
-        if (!matching?.session) throw new Error(`Running subagent not found: ${requestedId || "missing sessionId"}`);
+        if (!matching?.session)
+          throw new Error(
+            `Running subagent not found: ${requestedId || "missing sessionId"}`,
+          );
         if (!message?.trim()) throw new Error("message is required for steer");
         await matching.session.steer(message.trim());
-        return { content: [{ type: "text" as const, text: `Queued steering for subagent ${matching.sessionId} after its current turn` }], details: { sessionId: matching.sessionId, queued: true } };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Queued steering for subagent ${matching.sessionId} after its current turn`,
+            },
+          ],
+          details: { sessionId: matching.sessionId, queued: true },
+        };
       }
       if (!prompt?.trim()) throw new Error("prompt is required for spawn");
       const expectedGeneration = generation;
       guard(expectedGeneration);
-      const setupSignal = AbortSignal.any([...(signal ? [signal] : []), lifecycle.signal]);
+      const setupSignal = AbortSignal.any([
+        ...(signal ? [signal] : []),
+        lifecycle.signal,
+      ]);
       const checkSetup = () => {
         guard(expectedGeneration);
-        if (setupSignal.aborted) throw new Error("Subagent setup was cancelled");
+        if (setupSignal.aborted)
+          throw new Error("Subagent setup was cancelled");
       };
       prompt = prompt.trim();
-      if (requestedId && matching) throw new Error(`Subagent session ${requestedId} is already running`);
-      if (worktree && cwd !== undefined) throw new Error("cwd cannot be combined with worktree:true");
-      if (requestedId && worktree) throw new Error("worktree:true is only valid for a new subagent session");
-      if (requestedId && context === "fork") throw new Error("context:fork is only valid for a new subagent session");
+      if (requestedId && matching)
+        throw new Error(`Subagent session ${requestedId} is already running`);
+      if (worktree && cwd !== undefined)
+        throw new Error("cwd cannot be combined with worktree:true");
+      if (requestedId && worktree)
+        throw new Error(
+          "worktree:true is only valid for a new subagent session",
+        );
+      if (requestedId && context === "fork")
+        throw new Error(
+          "context:fork is only valid for a new subagent session",
+        );
 
       const existing = requestedId ? readIndex()[requestedId] : undefined;
-      if (requestedId && !existing) throw new Error(`Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`);
-      if (existing && (!existsSync(existing.cwd) || !statSync(existing.cwd).isDirectory())) {
-        throw new Error(`Cannot resume subagent ${requestedId}: saved cwd${existing.branch ? "/worktree" : ""} is missing or deleted: ${existing.cwd}`);
+      if (requestedId && !existing)
+        throw new Error(
+          `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
+        );
+      if (
+        existing &&
+        (!existsSync(existing.cwd) || !statSync(existing.cwd).isDirectory())
+      ) {
+        throw new Error(
+          `Cannot resume subagent ${requestedId}: saved cwd${existing.branch ? "/worktree" : ""} is missing or deleted: ${existing.cwd}`,
+        );
       }
-      if (existing && !existsSync(existing.sessionFile)) throw new Error(`Cannot resume subagent ${requestedId}: session file is missing or deleted: ${existing.sessionFile}`);
+      if (existing && !existsSync(existing.sessionFile))
+        throw new Error(
+          `Cannot resume subagent ${requestedId}: session file is missing or deleted: ${existing.sessionFile}`,
+        );
 
       let branch: string | undefined;
       let childCwd: string;
       if (existing) {
         childCwd = realpathSync(existing.cwd);
-        if (cwd && resolveSubagentCwd(ctx.cwd, cwd) !== childCwd) throw new Error(`cwd does not match the saved subagent cwd: ${childCwd}`);
+        if (cwd && resolveSubagentCwd(ctx.cwd, cwd) !== childCwd)
+          throw new Error(
+            `cwd does not match the saved subagent cwd: ${childCwd}`,
+          );
         branch = existing.branch;
       } else if (worktree) {
         const created = await createWorktree(ctx, setupSignal);
@@ -602,35 +1184,109 @@ export default function (pi: ExtensionAPI) {
       const runtime = await modelRuntime;
       checkSetup();
       for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-        const native = ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-        const config = ctx.modelRegistry.getRegisteredProviderConfig(providerId);
+        const native =
+          ctx.modelRegistry.getRegisteredNativeProvider(providerId);
+        const config =
+          ctx.modelRegistry.getRegisteredProviderConfig(providerId);
         if (native) runtime.registerNativeProvider(native);
         else if (config) runtime.registerProvider(providerId, config);
       }
       const modelSpec = model?.trim();
-      const resolved = modelSpec ? resolveCliModel({ cliModel: modelSpec, cliThinking: thinking, modelRuntime: runtime }) : undefined;
-      if (resolved?.error) throw new Error(resolved.error);
-      if (resolved?.warning) console.warn(resolved.warning);
+      let resolvedModel: any | undefined;
+      let resolvedThinking: any | undefined;
 
-      const parentTools = pi.getActiveTools().filter((name) => name !== "bg" && name !== "subagent");
-      const requestedTools = tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
-      const unknownTools = requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
-      if (unknownTools.length) throw new Error(`Tools are not active in the parent session: ${unknownTools.join(", ")}`);
+      const scopedList = (ctx as any).scopedModels as
+        Array<{ model: any; thinkingLevel?: any }> | undefined;
+      if (modelSpec) {
+        if (scopedList && scopedList.length > 0) {
+          const lowerSpec = modelSpec.toLowerCase();
+          const exact = scopedList.find(
+            (s) =>
+              `${s.model.provider}/${s.model.id}`.toLowerCase() === lowerSpec ||
+              s.model.id.toLowerCase() === lowerSpec,
+          );
+          const matched =
+            exact ??
+            scopedList.find(
+              (s) =>
+                s.model.id.toLowerCase().includes(lowerSpec) ||
+                (s.model.name &&
+                  String(s.model.name).toLowerCase().includes(lowerSpec)) ||
+                s.model.provider.toLowerCase().includes(lowerSpec),
+            );
+          if (matched) {
+            resolvedModel = matched.model;
+            resolvedThinking = thinking ?? matched.thinkingLevel;
+          } else {
+            const availableNames = scopedList
+              .map((s) => `${s.model.provider}/${s.model.id}`)
+              .join(", ");
+            throw new Error(
+              `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
+            );
+          }
+        } else {
+          const resolved = resolveCliModel({
+            cliModel: modelSpec,
+            cliThinking: thinking,
+            modelRuntime: runtime,
+          });
+          if (resolved.error) throw new Error(resolved.error);
+          if (resolved.warning) console.warn(resolved.warning);
+          resolvedModel = resolved.model;
+          resolvedThinking = thinking ?? resolved.thinkingLevel;
+        }
+      }
+
+      const parentTools = pi
+        .getActiveTools()
+        .filter((name) => name !== "bg" && name !== "subagent");
+      const requestedTools = tools
+        ?.split(",")
+        .map((tool) => tool.trim())
+        .filter(Boolean);
+      const unknownTools =
+        requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
+      if (unknownTools.length)
+        throw new Error(
+          `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
+        );
       const childTools = requestedTools ?? parentTools;
 
       mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
       const sessionManager = existing
-        ? SessionManager.open(existing.sessionFile, SUBAGENT_SESSION_DIR, childCwd)
-        : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR, context === "fork" ? { parentSession: ctx.sessionManager.getSessionFile() } : undefined);
-      if (!existing && context === "fork") for (const parentMessage of sanitizeForkMessages(ctx)) sessionManager.appendMessage(parentMessage);
-      const requestedThinking = thinking ?? resolved?.thinkingLevel;
-      const selectedModel = resolved?.model ?? (!existing ? ctx.model : undefined);
+        ? SessionManager.open(
+            existing.sessionFile,
+            SUBAGENT_SESSION_DIR,
+            childCwd,
+          )
+        : SessionManager.create(
+            childCwd,
+            SUBAGENT_SESSION_DIR,
+            context === "fork"
+              ? { parentSession: ctx.sessionManager.getSessionFile() }
+              : undefined,
+          );
+      if (!existing && context === "fork")
+        for (const parentMessage of sanitizeForkMessages(ctx))
+          sessionManager.appendMessage(parentMessage);
+      const requestedThinking = thinking ?? resolvedThinking;
+      const scopedModel =
+        !resolvedModel && !existing
+          ? ((ctx as any).scopedModels?.[0]?.model ?? ctx.model)
+          : undefined;
+      const selectedModel = resolvedModel ?? scopedModel;
       if (selectedModel) {
-        const runtimeKey = await ctx.modelRegistry.getApiKeyForProvider(selectedModel.provider);
+        const runtimeKey = await ctx.modelRegistry.getApiKeyForProvider(
+          selectedModel.provider,
+        );
         checkSetup();
-        if (runtimeKey) runtime.setRuntimeApiKey(selectedModel.provider, runtimeKey);
+        if (runtimeKey)
+          runtime.setRuntimeApiKey(selectedModel.provider, runtimeKey);
       }
-      let sessionLock = existing ? acquireSessionLock(existing.sessionId) : undefined;
+      let sessionLock = existing
+        ? acquireSessionLock(existing.sessionId)
+        : undefined;
       let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
       try {
         created = await createAgentSession({
@@ -640,7 +1296,11 @@ export default function (pi: ExtensionAPI) {
           modelRuntime: runtime,
           sessionManager,
           ...(selectedModel ? { model: selectedModel } : {}),
-          ...(!existing ? { thinkingLevel: requestedThinking ?? ctx.thinkingLevel } : requestedThinking ? { thinkingLevel: requestedThinking } : {}),
+          ...(!existing
+            ? { thinkingLevel: requestedThinking ?? ctx.thinkingLevel }
+            : requestedThinking
+              ? { thinkingLevel: requestedThinking }
+              : {}),
         });
         checkSetup();
         sessionLock ??= acquireSessionLock(created.session.sessionId);
@@ -658,7 +1318,10 @@ export default function (pi: ExtensionAPI) {
         disposed = true;
         if (extensionsBound) {
           try {
-            await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+            await session.extensionRunner.emit({
+              type: "session_shutdown",
+              reason: "quit",
+            });
           } catch {}
         }
         session.dispose();
@@ -671,11 +1334,16 @@ export default function (pi: ExtensionAPI) {
           mode: "print",
           abortHandler: () => void session.abort(),
           shutdownHandler: () => controller.abort(),
-          onError: (error) => console.warn(`Subagent extension error: ${error.error}`),
+          onError: (error) =>
+            console.warn(`Subagent extension error: ${error.error}`),
         });
         checkSetup();
-        if (controller.signal.aborted) throw new Error("Subagent extension requested shutdown during setup");
-        for (const error of extensionsResult.errors) console.warn(`Subagent extension failed to load ${error.path}: ${error.error}`);
+        if (controller.signal.aborted)
+          throw new Error("Subagent extension requested shutdown during setup");
+        for (const error of extensionsResult.errors)
+          console.warn(
+            `Subagent extension failed to load ${error.path}: ${error.error}`,
+          );
       } catch (error) {
         await disposeChild();
         throw error;
@@ -685,20 +1353,34 @@ export default function (pi: ExtensionAPI) {
         await disposeChild();
         throw new Error("Subagent session did not initialize a model");
       }
-      const actualTools = session.getActiveToolNames().filter((name) => name !== "bg" && name !== "subagent");
-      const missingTools = requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
+      const actualTools = session
+        .getActiveToolNames()
+        .filter((name) => name !== "bg" && name !== "subagent");
+      const missingTools =
+        requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
       if (missingTools.length) {
         await disposeChild();
-        throw new Error(`Requested tools were not available in the child: ${missingTools.join(", ")}`);
+        throw new Error(
+          `Requested tools were not available in the child: ${missingTools.join(", ")}`,
+        );
       }
       if (!existing) {
-        sessionManager.appendCustomEntry("pi-background-agents", { createdAt: new Date().toISOString() });
-        if (context === "fork") sessionManager.appendModelChange(session.model.provider, session.model.id);
+        sessionManager.appendCustomEntry("pi-background-agents", {
+          createdAt: new Date().toISOString(),
+        });
+        if (context === "fork")
+          sessionManager.appendModelChange(
+            session.model.provider,
+            session.model.id,
+          );
       }
-      const sessionFile = session.sessionFile ?? sessionManager.getSessionFile();
+      const sessionFile =
+        session.sessionFile ?? sessionManager.getSessionFile();
       if (!sessionFile) {
         await disposeChild();
-        throw new Error("Subagent session did not initialize a persistent session path");
+        throw new Error(
+          "Subagent session did not initialize a persistent session path",
+        );
       }
 
       const pid = nextVirtualPid--;
@@ -706,11 +1388,17 @@ export default function (pi: ExtensionAPI) {
       let cancelled = false;
       let partialAssistant: any;
       const runAssistants: any[] = [];
-      controller.signal.addEventListener("abort", () => {
-        cancelled = !timedOut;
-        void session.abort();
-      }, { once: true });
-      const label = description?.trim() || (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
+      controller.signal.addEventListener(
+        "abort",
+        () => {
+          cancelled = !timedOut;
+          void session.abort();
+        },
+        { once: true },
+      );
+      const label =
+        description?.trim() ||
+        (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
       const displayModel = `${session.model.provider}/${session.model.id}`;
       const now = new Date().toISOString();
       const record: SubagentRecord = {
@@ -726,7 +1414,14 @@ export default function (pi: ExtensionAPI) {
         turns: 0,
         toolCount: 0,
         toolFailures: 0,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+          cost: 0,
+        },
         inheritedTools: actualTools,
         branch,
         context: existing?.context ?? context,
@@ -734,9 +1429,20 @@ export default function (pi: ExtensionAPI) {
         ownerPid: process.pid,
       };
       const job: BgJob = {
-        pid, command: `Subagent: ${label}`, startedAt: Date.now(), sessionId: session.sessionId,
-        controller, kind: "subagent", session, activity: "starting", completion,
-        baseline: session.getSessionStats(), record, toolFailures: 0, activeTools: new Map(), sessionLock,
+        pid,
+        command: `Subagent: ${label}`,
+        startedAt: Date.now(),
+        sessionId: session.sessionId,
+        controller,
+        kind: "subagent",
+        session,
+        activity: "starting",
+        completion,
+        baseline: session.getSessionStats(),
+        record,
+        toolFailures: 0,
+        activeTools: new Map(),
+        sessionLock,
       };
       try {
         jobs.set(pid, job);
@@ -753,21 +1459,40 @@ export default function (pi: ExtensionAPI) {
         syncStatus(ctx);
       };
       const unsubscribe = session.subscribe((event) => {
-        if (event.type === "message_update" && event.message.role === "assistant") partialAssistant = event.message;
-        if (event.type === "message_end" && event.message.role === "assistant") runAssistants.push(event.message);
+        if (
+          event.type === "message_update" &&
+          event.message.role === "assistant"
+        )
+          partialAssistant = event.message;
+        if (event.type === "message_end" && event.message.role === "assistant")
+          runAssistants.push(event.message);
         if (event.type === "turn_start") setActivity("thinking");
-        else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && !job.activeTools!.size) setActivity("responding");
+        else if (
+          event.type === "message_update" &&
+          event.assistantMessageEvent.type === "text_delta" &&
+          !job.activeTools!.size
+        )
+          setActivity("responding");
         else if (event.type === "tool_execution_start") {
           job.activeTools!.set(event.toolCallId, event.toolName);
           setActivity(`tool: ${[...job.activeTools!.values()].join(", ")}`);
         } else if (event.type === "tool_execution_end") {
           job.activeTools!.delete(event.toolCallId);
           if (event.isError) job.toolFailures!++;
-          setActivity(job.activeTools!.size ? `tool: ${[...job.activeTools!.values()].join(", ")}` : event.isError ? `tool failed: ${event.toolName}` : "thinking");
+          setActivity(
+            job.activeTools!.size
+              ? `tool: ${[...job.activeTools!.values()].join(", ")}`
+              : event.isError
+                ? `tool failed: ${event.toolName}`
+                : "thinking",
+          );
         }
       });
       syncStatus(ctx);
-      const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutSec * 1000);
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutSec * 1000);
       const operation = existing ? "continued" : "created";
       const done = (async () => {
         try {
@@ -779,11 +1504,28 @@ export default function (pi: ExtensionAPI) {
           }
           const assistant = runAssistants.at(-1) ?? partialAssistant;
           const stopped = cancelled || assistant?.stopReason === "aborted";
-          const failed = Boolean(thrown || assistant?.errorMessage || assistant?.stopReason === "error");
-          const state: TerminalState = timedOut ? "timed-out" : stopped ? "stopped" : failed ? "failed" : "finished";
+          const failed = Boolean(
+            thrown ||
+            assistant?.errorMessage ||
+            assistant?.stopReason === "error",
+          );
+          const state: TerminalState = timedOut
+            ? "timed-out"
+            : stopped
+              ? "stopped"
+              : failed
+                ? "failed"
+                : "finished";
           let reason = thrown ?? assistant?.errorMessage;
           const rawText = Array.isArray(assistant?.content)
-            ? assistant.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n").trim()
+            ? assistant.content
+                .filter(
+                  (part: any) =>
+                    part?.type === "text" && typeof part.text === "string",
+                )
+                .map((part: any) => part.text)
+                .join("\n")
+                .trim()
             : "";
           const truncated = truncateTail(rawText);
           let truncationNote = "";
@@ -794,7 +1536,8 @@ export default function (pi: ExtensionAPI) {
               truncationNote = `\n\nResult truncated; full output: ${logFile}`;
             } catch (logError) {
               console.warn(`Could not save full subagent output:`, logError);
-              truncationNote = "\n\nResult truncated; full output remains in the durable session file.";
+              truncationNote =
+                "\n\nResult truncated; full output remains in the durable session file.";
             }
           }
           if (!shuttingDown && generation === expectedGeneration) {
@@ -804,20 +1547,39 @@ export default function (pi: ExtensionAPI) {
               durationSec: Math.round((Date.now() - job.startedAt) / 1000),
               updatedAt: new Date().toISOString(),
             };
-            try { saveRecord(job.record); }
-            catch (recordError) {
+            try {
+              saveRecord(job.record);
+            } catch (recordError) {
               console.warn(`Could not save final subagent state:`, recordError);
               reason ??= `Could not save final subagent state: ${recordError instanceof Error ? recordError.message : String(recordError)}`;
             }
           }
           const completedRecord = job.record;
-          if (!completedRecord) throw new Error(`Missing durable record for subagent ${session.sessionId}`);
+          if (!completedRecord)
+            throw new Error(
+              `Missing durable record for subagent ${session.sessionId}`,
+            );
           const usage = completedRecord.usage;
-          const telemetry = `\n\nSubagent: ${operation} session:${session.sessionId} model:${displayModel}:${session.thinkingLevel} cwd:${childCwd} turns:${completedRecord.turns} tools:${completedRecord.toolCount} failures:${completedRecord.toolFailures} duration:${completedRecord.durationSec}s sessionFile:${sessionFile}`;
-          const usageText = `\nUsage: in:${usage.input} out:${usage.output} R:${usage.cacheRead} W:${usage.cacheWrite} total:${usage.total} cost:$${usage.cost.toFixed(4)}`;
-          const recovery = state === "finished" ? "" : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
-          const fallback = modelFallbackMessage ? `\nModel fallback: ${modelFallbackMessage}` : "";
-          deliverCompletion(`${getSubagentHeading(reason || (failed ? "failed" : undefined), timedOut, stopped)}\nTask: Subagent: ${label}${truncated.content ? `\n\nResult:\n${truncated.content}` : ""}${truncationNote}${reason ? `\n\nReason: ${reason}` : ""}${recovery}${telemetry}${usageText}${fallback}`, ctx, completion, expectedGeneration);
+          const costText = usage.cost ? `, $${usage.cost.toFixed(4)}` : "";
+          const badge = `\n\n— Subagent ${state} (${completedRecord.durationSec ?? 0}s, ${completedRecord.turns} turn${completedRecord.turns === 1 ? "" : "s"}, ${completedRecord.toolCount} tool${completedRecord.toolCount === 1 ? "" : "s"}${costText}) • Session: ${session.sessionId}`;
+          const recovery =
+            state === "finished"
+              ? ""
+              : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
+          const fallback = modelFallbackMessage
+            ? `\nModel fallback: ${modelFallbackMessage}`
+            : "";
+          const header = `${getSubagentHeading(reason || (failed ? "failed" : undefined), timedOut, stopped)}: ${label}`;
+          const mainContent = truncated.content
+            ? `\n\n${truncated.content}`
+            : "";
+          const reasonText = reason ? `\n\nReason: ${reason}` : "";
+          deliverCompletion(
+            `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
+            ctx,
+            completion,
+            expectedGeneration,
+          );
         } finally {
           clearTimeout(timer);
           unsubscribe();
@@ -828,12 +1590,101 @@ export default function (pi: ExtensionAPI) {
       })();
       job.done = track(done);
 
-      const location = branch ? `\nBranch: ${branch}\nWorktree: ${childCwd}` : "";
-      const fallback = modelFallbackMessage ? `\nModel fallback: ${modelFallbackMessage}` : "";
+      const location = branch ? `\nBranch: ${branch}` : "";
+      const fallback = modelFallbackMessage
+        ? `\nModel fallback: ${modelFallbackMessage}`
+        : "";
+      const queueMsg =
+        completion === "queue"
+          ? " Output queued for next turn."
+          : " The result will arrive automatically.";
       return {
-        content: [{ type: "text", text: `${existing ? "Continued" : "Created"}: Subagent: ${label}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, the result is lost but the session remains resumable." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use subagent status or /bg to inspect or stop it.\nSession: ${session.sessionId}\nModel: ${displayModel}:${session.thinkingLevel}\nCwd: ${childCwd}\nTools: ${actualTools.join(", ")}\nContext: ${record.context}\nCompletion: ${completion}${location}${fallback}` }],
-        details: { pid, sessionId: session.sessionId, sessionFile, model: displayModel, thinking: session.thinkingLevel, cwd: childCwd, inheritedTools: actualTools, context: record.context, state: record.state, continued: Boolean(existing), ...(branch ? { branch } : {}), ...(modelFallbackMessage ? { modelFallback: modelFallbackMessage } : {}) },
+        content: [
+          {
+            type: "text",
+            text: `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${queueMsg}${location}${fallback}`,
+          },
+        ],
+        details: {
+          pid,
+          sessionId: session.sessionId,
+          sessionFile,
+          model: displayModel,
+          thinking: session.thinkingLevel,
+          cwd: childCwd,
+          inheritedTools: actualTools,
+          context: record.context,
+          state: record.state,
+          continued: Boolean(existing),
+          ...(branch ? { branch } : {}),
+          ...(modelFallbackMessage
+            ? { modelFallback: modelFallbackMessage }
+            : {}),
+        },
       };
+    },
+    renderCall(args, theme, _context) {
+      const action = args.action ?? "spawn";
+      if (action === "status")
+        return new Text(
+          theme.fg(
+            "toolTitle",
+            theme.bold(
+              `Subagent status${args.sessionId ? `: ${args.sessionId}` : ""}`,
+            ),
+          ),
+          0,
+          0,
+        ) as any;
+      if (action === "stop")
+        return new Text(
+          theme.fg(
+            "toolTitle",
+            theme.bold(`Stop subagent ${args.sessionId ?? ""}`),
+          ),
+          0,
+          0,
+        ) as any;
+      if (action === "steer")
+        return new Text(
+          theme.fg(
+            "toolTitle",
+            theme.bold(
+              `Steer subagent ${args.sessionId ?? ""}: ${args.message ?? ""}`,
+            ),
+          ),
+          0,
+          0,
+        ) as any;
+
+      const label = args.description || args.prompt || "...";
+      const modelTag = args.model
+        ? ` [${args.model}${args.thinking ? `:${args.thinking}` : ""}]`
+        : "";
+      const completionTag = args.completion === "queue" ? " [queue]" : "";
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold(`Subagent: ${label}`))}${theme.fg("dim", modelTag + completionTag)}`,
+        0,
+        0,
+      ) as any;
+    },
+    renderResult(result, options, theme, context) {
+      const text =
+        result.content
+          ?.map((c) => (c.type === "text" ? c.text : ""))
+          .filter(Boolean)
+          .join("\n")
+          .trim() || "";
+      if (!text) return new Text("", 0, 0) as any;
+      if (options.expanded) {
+        return createMarkdownComponent(text, theme);
+      }
+      const lines = text.split("\n");
+      const preview = lines.slice(0, 10).join("\n");
+      const hidden = lines.length - 10;
+      const hint =
+        hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
+      return createMarkdownComponent(preview + hint, theme);
     },
   });
 }

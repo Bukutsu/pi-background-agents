@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Added custom native Pi TUI renderers (`renderCall` and `renderResult`) for `bg` and `subagent` tools.
+- Added session environment variable propagation (`PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, `PI_REASONING_LEVEL`) for background bash tasks.
+- Added support for Pi 0.83.0 `ctx.scopedModels` model resolution and strict scope enforcement when spawning subagents.
+- Suppressed duplicate TUI custom message rendering (`display: false`) on steered background completions.
+
 ## 0.2.0
 
 - Renamed the package to `pi-background-agents`.
