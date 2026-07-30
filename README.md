@@ -117,7 +117,7 @@ When spawning a new subagent without an explicit `model` parameter:
 { "action": "stop", "sessionId": "<session-id>" }
 ```
 
-Status includes active sessions and the 50 most recently updated completed sessions. It reports the effective model and thinking level, directory, current activity, turns, tool calls and failures, token usage, cost, duration, and session file.
+Status includes active sessions and up to 5 recently updated completed sessions (or a specific session when `sessionId` is provided). It reports the effective model and thinking level, directory, current activity, turns, tool calls and failures, token usage, cost, duration, and session file.
 
 Steering does not interrupt the current turn. The message is delivered after that turn finishes.
 

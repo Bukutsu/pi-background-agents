@@ -774,7 +774,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
     lifecycle.abort();
-    if (widgetTimer) clearInterval(widgetTimer);
+    if (widgetTimer) {
+      clearInterval(widgetTimer);
+      widgetTimer = undefined;
+    }
     for (const [pid, job] of jobs) {
       try {
         if (job.record) {
@@ -1206,7 +1209,7 @@ export default function (pi: ExtensionAPI) {
               ...Object.values(durable)
                 .filter((record) => !active.has(record.sessionId))
                 .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-                .slice(0, 50),
+                .slice(0, 5),
             ];
         const sessions = records.map((record) =>
           statusDetails(record, active.get(record.sessionId)),
