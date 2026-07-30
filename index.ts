@@ -316,8 +316,11 @@ function acquireSessionLock(sessionId: string) {
     } catch (error: any) {
       if (error?.code !== "EEXIST" && error?.code !== "ENOTEMPTY") throw error;
       try {
-        const owner = Number(readFileSync(join(lock, "owner"), "utf8"));
-        if (processIsAlive(owner))
+        const ownerFile = join(lock, "owner");
+        const owner = existsSync(ownerFile)
+          ? Number(readFileSync(ownerFile, "utf8"))
+          : NaN;
+        if (!Number.isNaN(owner) && processIsAlive(owner))
           throw new Error(
             `Subagent session ${sessionId} is already running in process ${owner}`,
           );
@@ -1028,8 +1031,9 @@ export default function (pi: ExtensionAPI) {
         s.activity ??
         `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`;
 
+      const thinkingStr = s.thinking ? `:${s.thinking}` : "";
       return `${icon} ${s.state}  ${s.label}
-  Model: \`${s.model}:${s.thinking}\` | Session: \`${shortId}\`${durationStr}${costText}
+  Model: \`${s.model}${thinkingStr}\` | Session: \`${shortId}\`${durationStr}${costText}
   Activity: ${activityStr}`;
     });
 
@@ -1188,10 +1192,19 @@ export default function (pi: ExtensionAPI) {
     ) {
       currentCtx = ctx;
       const requestedId = sessionId?.trim();
+      const durable = readIndex();
+      const findActiveSubagent = (id: string) =>
+        Array.from(jobs.values()).find(
+          (job) =>
+            job.kind === "subagent" &&
+            (job.sessionId === id || job.sessionId?.startsWith(id)),
+        );
+      const findDurableRecord = (id: string) =>
+        durable[id] ??
+        Object.values(durable).find((r) => r.sessionId.startsWith(id));
+
       const matching = requestedId
-        ? Array.from(jobs.values()).find(
-            (job) => job.kind === "subagent" && job.sessionId === requestedId,
-          )
+        ? findActiveSubagent(requestedId)
         : undefined;
       if (action === "status") {
         const active = new Map(
@@ -1199,10 +1212,16 @@ export default function (pi: ExtensionAPI) {
             .filter((job) => job.kind === "subagent" && job.record)
             .map((job) => [job.sessionId!, job]),
         );
-        const durable = readIndex();
+        const requestedRecord = requestedId
+          ? (active.get(requestedId)?.record ??
+            Array.from(active.values()).find((j) =>
+              j.sessionId?.startsWith(requestedId),
+            )?.record ??
+            findDurableRecord(requestedId))
+          : undefined;
         const records = requestedId
-          ? active.get(requestedId)?.record || durable[requestedId]
-            ? [active.get(requestedId)?.record ?? durable[requestedId]]
+          ? requestedRecord
+            ? [requestedRecord]
             : []
           : [
               ...Array.from(active.values(), (job) => job.record!),
@@ -1286,7 +1305,7 @@ export default function (pi: ExtensionAPI) {
           "context:fork is only valid for a new subagent session",
         );
 
-      const existing = requestedId ? readIndex()[requestedId] : undefined;
+      const existing = requestedId ? findDurableRecord(requestedId) : undefined;
       if (requestedId && !existing)
         throw new Error(
           `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
@@ -1550,15 +1569,20 @@ export default function (pi: ExtensionAPI) {
           `Requested tools were not available in the child: ${missingTools.join(", ")}`,
         );
       }
-      if (!existing) {
-        sessionManager.appendCustomEntry("pi-background-agents", {
-          createdAt: new Date().toISOString(),
-        });
-        if (context === "fork")
-          sessionManager.appendModelChange(
-            session.model.provider,
-            session.model.id,
-          );
+      try {
+        if (!existing) {
+          sessionManager.appendCustomEntry("pi-background-agents", {
+            createdAt: new Date().toISOString(),
+          });
+          if (context === "fork")
+            sessionManager.appendModelChange(
+              session.model.provider,
+              session.model.id,
+            );
+        }
+      } catch (error) {
+        await disposeChild();
+        throw error;
       }
       const sessionFile =
         session.sessionFile ?? sessionManager.getSessionFile();
@@ -1574,14 +1598,19 @@ export default function (pi: ExtensionAPI) {
       let cancelled = false;
       let partialAssistant: any;
       const runAssistants: any[] = [];
-      controller.signal.addEventListener(
-        "abort",
-        () => {
-          cancelled = !timedOut;
-          void session.abort().catch(() => {});
-        },
-        { once: true },
-      );
+      if (controller.signal.aborted) {
+        cancelled = !timedOut;
+        void session.abort().catch(() => {});
+      } else {
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            cancelled = !timedOut;
+            void session.abort().catch(() => {});
+          },
+          { once: true },
+        );
+      }
       const label =
         description?.trim() ||
         (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
