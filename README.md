@@ -17,7 +17,7 @@ Use `bg` for commands that should not block the conversation, such as test suite
 ```json
 { "command": "npm run build", "timeoutSec": 300 }
 { "action": "status" }
-{ "action": "stop", "pid": -1 }
+{ "action": "stop", "pid": 42 }
 ```
 
 Parameters:
@@ -44,7 +44,7 @@ Use `subagent` for work that benefits from a separate context, model, or working
 }
 ```
 
-The call returns immediately. Pi receives the child's final response when it finishes. `completion: "queue"` uses Pi's in-memory next-turn queue, so exit or reload before the next message discards that queued delivery; the child session and status record remain durable.
+A `spawn` call returns immediately. Pi receives the child's final response when it finishes. `chain` runs in the foreground: it joins each step sequentially and returns when all steps finish. `completion: "queue"` uses Pi's in-memory next-turn queue, so exit or reload before the next message discards that queued delivery; the child session and status record remain durable.
 
 Parameters:
 
@@ -63,6 +63,7 @@ Parameters:
 | `worktree`    | `false`                                         | Create a branch and worktree for a new child                                                                                                                 |
 | `context`     | `"project"`                                     | `project` starts fresh; `fork` copies the current parent context                                                                                             |
 | `timeoutSec`  | `600`                                           | Child timeout                                                                                                                                                |
+| `chain`       |                                                 | Sequential steps `[{prompt}, ...]`; runs in the foreground (see [Chain](#chain))                                                                              |
 
 ### Parallel edits
 
@@ -79,6 +80,21 @@ Set `worktree: true` when subagents will edit in parallel:
 `pi-background-agents` creates a branch from the current `HEAD` and a worktree under `<agent-dir>/pi-bg/worktrees`. Git checkout hooks are disabled during creation. It returns both paths and leaves them in place. Merging and cleanup stay under your control.
 
 `cwd` and `worktree: true` cannot be used together.
+
+### Chain
+
+For sequential subagent workflows (scout → plan → implement), pass a list of steps. Later prompts can reference the previous step's text with `{previous}`:
+
+```json
+{
+  "chain": [
+    { "prompt": "Audit the auth flow and list concrete bugs", "description": "Audit" },
+    { "prompt": "Fix the bugs from {previous}", "description": "Fix" }
+  ]
+}
+```
+
+Chain steps run one after another **in the foreground** — the call blocks until all steps finish (or one fails; a failed step stops the chain). Steps are transient: each runs in an in-memory session with no durable record, so they cannot be resumed, steered, or listed by `sessionId`. Use `chain` when steps must reference earlier output; use multiple independent `subagent` spawns in one turn for parallel work.
 
 ### Context
 
@@ -97,7 +113,7 @@ Subagent sessions live under `<agent-dir>/pi-bg` and survive Pi restarts. Resume
 }
 ```
 
-A resumed child returns to its saved directory and restores its model and thinking level unless the call overrides them. Resume fails if its session file or working directory has been removed.
+A resumed child returns to its saved directory and restores its model and thinking level unless the call overrides them. Resume fails if its session file or working directory has been removed. Chain steps are not durable and cannot be resumed.
 
 ### Model selection & scoped models
 
@@ -135,8 +151,22 @@ Use `/bg` to inspect or stop active jobs:
 
 ```text
 /bg
-/bg kill -1
+/bg kill 42
 ```
+
+## Environment variables
+
+Shell jobs spawned by `bg` inherit the current environment plus the session identity, with any stale launcher values replaced:
+
+| Variable             | Value                                        |
+| -------------------- | -------------------------------------------- |
+| `PI_SESSION_ID`      | Current session ID                           |
+| `PI_SESSION_FILE`    | Current session file (when available)        |
+| `PI_PROVIDER`        | Current provider (`provider/model` split)    |
+| `PI_MODEL`           | Current model ID                             |
+| `PI_REASONING_LEVEL` | Current thinking level                       |
+
+Subagent children likewise receive these values.
 
 ## Storage
 
@@ -158,13 +188,9 @@ By default, subagents can only use model providers the host has configured. To l
   PI_BG_PROVIDERS=antigravity
   ```
 
-- Or a sibling `pi-bg.config.json`:
-
-  ```json
-  { "providers": ["antigravity"] }
-  ```
-
 Each entry is a module specifier that resolves to a [`Provider`](https://github.com/Earendil-Works/pi) object or a provider config (`{ name, baseUrl, api, models, ... }`). Once registered, models such as `antigravity/gemini-3.6-flash` become selectable via the subagent `model` parameter like any built-in provider. A package that fails to load is logged and skipped, so one bad entry does not break the extension.
+
+Provider loading is intentionally restricted to the explicit `PI_BG_PROVIDERS` environment variable. It runs during global extension init, before Pi has trusted any project, so a project-local config file must never trigger package imports.
 
 ## Design constraints
 

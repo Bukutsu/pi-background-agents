@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import type {
   ExtensionAPI,
@@ -32,7 +32,14 @@ export async function removeWorktree(
   try {
     rmSync(path, { recursive: true, force: true });
   } catch {}
-  if (branch && removed) {
+  // If git removal failed, drop the stale registration so the branch is not
+  // left "checked out"; delete the branch either way (best effort).
+  if (!removed) {
+    try {
+      await pi.exec("git", ["worktree", "prune"], { cwd: root });
+    } catch {}
+  }
+  if (branch) {
     try {
       await pi.exec("git", ["branch", "-D", branch], { cwd: root });
     } catch {}
@@ -56,6 +63,7 @@ export async function createWorktree(
   const id = randomUUID().slice(0, 8);
   const branch = `pi-background-agents/${Date.now()}-${id}`;
   mkdirSync(SUBAGENT_WORKTREES, { recursive: true, mode: 0o700 });
+  chmodSync(SUBAGENT_WORKTREES, 0o700); // tighten pre-existing dirs
   const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
   try {
     const result = await pi.exec(

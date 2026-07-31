@@ -26,12 +26,19 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     completion: "queue" | "continue" = "continue",
   ) {
     const expectedGeneration = manager.generation;
+    manager.guard(expectedGeneration);
     const shownCommand =
       command.length > MAX_CMD_LEN
         ? `${command.slice(0, MAX_CMD_LEN - 3)}...`
         : command;
     const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
+    const abortFromShutdown = () => controller.abort();
+    if (manager.lifecycle.signal.aborted) controller.abort();
+    else
+      manager.lifecycle.signal.addEventListener("abort", abortFromShutdown, {
+        once: true,
+      });
     let output = "";
     let outputTruncated = false;
     const job: BgJob = {
@@ -45,17 +52,24 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     manager.jobs.set(pid, job);
     manager.syncStatus(ctx);
 
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      PI_SESSION_ID: ctx.sessionManager.getSessionId(),
-      ...(ctx.sessionManager.getSessionFile()
-        ? { PI_SESSION_FILE: ctx.sessionManager.getSessionFile() }
-        : {}),
-      ...(ctx.model
-        ? { PI_PROVIDER: ctx.model.provider, PI_MODEL: ctx.model.id }
-        : {}),
-      ...(ctx.thinkingLevel ? { PI_REASONING_LEVEL: ctx.thinkingLevel } : {}),
-    };
+    // Drop stale launcher PI_* values first, then set this session's.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of [
+      "PI_SESSION_ID",
+      "PI_SESSION_FILE",
+      "PI_PROVIDER",
+      "PI_MODEL",
+      "PI_REASONING_LEVEL",
+    ])
+      delete env[key];
+    env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
+    if (ctx.sessionManager.getSessionFile())
+      env.PI_SESSION_FILE = ctx.sessionManager.getSessionFile();
+    if (ctx.model) {
+      env.PI_PROVIDER = ctx.model.provider;
+      env.PI_MODEL = ctx.model.id;
+    }
+    if (ctx.thinkingLevel) env.PI_REASONING_LEVEL = ctx.thinkingLevel;
 
     job.done = manager.track(
       createLocalBashOperations()
@@ -74,6 +88,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     );
 
     function finish(exitCode: number | null, error?: unknown) {
+      manager.lifecycle.signal.removeEventListener("abort", abortFromShutdown);
       const message =
         error instanceof Error ? error.message : error ? String(error) : "";
       const timedOut = message.startsWith("timeout:");
@@ -112,7 +127,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       if (!job.stoppedManually) {
         manager.deliverCompletion(
           `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
-          completion,
+          job.completion ?? "continue",
           expectedGeneration,
         );
       }

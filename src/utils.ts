@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -102,9 +103,21 @@ export function readIndex(): Record<string, SubagentRecord> {
         if (
           !record ||
           typeof record.sessionId !== "string" ||
-          !/^[a-zA-Z0-9-]+$/.test(record.sessionId)
+          !/^[a-zA-Z0-9-]+$/.test(record.sessionId) ||
+          typeof record.cwd !== "string" ||
+          typeof record.sessionFile !== "string" ||
+          typeof record.model !== "string" ||
+          typeof record.label !== "string" ||
+          ![
+            "running",
+            "finished",
+            "failed",
+            "stopped",
+            "timed-out",
+            "interrupted",
+          ].includes(record.state)
         )
-          throw new Error("invalid sessionId");
+          throw new Error("invalid record");
         records[record.sessionId] = record;
       } catch (error) {
         console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
@@ -116,10 +129,15 @@ export function readIndex(): Record<string, SubagentRecord> {
   return records;
 }
 
+export function ensurePrivateDir(dir: string) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700); // tighten pre-existing dirs
+}
+
 export function saveRecord(record: SubagentRecord) {
   if (!/^[a-zA-Z0-9-]+$/.test(record.sessionId))
     throw new Error(`Invalid subagent session ID: ${record.sessionId}`);
-  mkdirSync(SUBAGENT_INDEX, { recursive: true, mode: 0o700 });
+  ensurePrivateDir(SUBAGENT_INDEX);
   const target = join(SUBAGENT_INDEX, `${record.sessionId}.json`);
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -219,7 +237,7 @@ export function processIsAlive(pid?: number) {
 export function acquireSessionLock(sessionId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(sessionId))
     throw new Error(`Invalid subagent session ID: ${sessionId}`);
-  mkdirSync(SUBAGENT_LOCKS, { recursive: true, mode: 0o700 });
+  ensurePrivateDir(SUBAGENT_LOCKS);
   const lock = join(SUBAGENT_LOCKS, sessionId);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -296,22 +314,14 @@ export function getScopedModels(ctx: ExtensionContext) {
 
 // ponytail: let the user plug in model providers from installed npm packages
 // (e.g. "antigravity") that the host itself doesn't have configured. Sourced
-// from the PI_BG_PROVIDERS env var and an optional ./pi-bg.config.json.
+// from the PI_BG_PROVIDERS env var only (never a project-local config file).
 export async function loadCustomProviders(pi: ExtensionAPI) {
+  // Only the explicit env var, never a project-local config file: this runs
+  // during global extension init, before Pi has trusted any project, and a
+  // config file in an untrusted checkout must not trigger package imports.
   const specifiers = new Set<string>();
   const env = process.env.PI_BG_PROVIDERS?.split(/[,\s]+/).filter(Boolean);
   if (env) for (const spec of env) specifiers.add(spec);
-  try {
-    const cfgPath = join(process.cwd(), "pi-bg.config.json");
-    if (existsSync(cfgPath)) {
-      const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-      if (Array.isArray(cfg?.providers))
-        for (const p of cfg.providers)
-          if (typeof p === "string") specifiers.add(p);
-    }
-  } catch (error) {
-    console.warn("Could not read pi-bg provider config:", error);
-  }
   const VALID_SPECIFIER = /^[a-z0-9@][a-z0-9@/_.-]*$/i;
   for (const spec of specifiers) {
     if (!VALID_SPECIFIER.test(spec) || spec.includes("..")) {

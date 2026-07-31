@@ -312,8 +312,9 @@ export class JobManager {
 
   public track(done: Promise<void>) {
     this.pending.add(done);
-    void done.finally(() => this.pending.delete(done));
-    done.catch(() => {});
+    // Catch on the finally chain so a rejecting job never leaves an
+    // unhandled rejection behind.
+    void done.finally(() => this.pending.delete(done)).catch(() => {});
     return done;
   }
 
