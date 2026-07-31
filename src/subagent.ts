@@ -242,7 +242,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           "running sessions",
         );
       const findDurableRecord = (id: string) => {
-        if (durable[id]) return durable[id];
+        if (Object.hasOwn(durable, id)) return durable[id];
         return findBySessionPrefix(Object.values(durable), id, "sessions");
       };
 
@@ -268,7 +268,13 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       const setupChildSession = async (opts: ChildSetupOptions) => {
         const { existing = false, checkSetup, shutdownHandler } = opts;
         modelRuntime ??= ModelRuntime.create();
-        const runtime = await modelRuntime;
+        let runtime: ModelRuntime;
+        try {
+          runtime = await modelRuntime;
+        } catch (error) {
+          modelRuntime = undefined;
+          throw error;
+        }
         checkSetup?.();
         for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
           try {
@@ -301,11 +307,18 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         if (modelSpec) {
           if (scopedList && scopedList.length > 0) {
             const lowerSpec = modelSpec.toLowerCase();
-            const exact = scopedList.find(
+            const exactMatches = scopedList.filter(
               (s) =>
                 `${s.model.provider}/${s.model.id}`.toLowerCase() ===
-                  lowerSpec || s.model.id.toLowerCase() === lowerSpec,
+                  lowerSpec ||
+                (!lowerSpec.includes("/") &&
+                  s.model.id.toLowerCase() === lowerSpec),
             );
+            if (exactMatches.length > 1) {
+              throw new Error(
+                `Ambiguous model specifier '${modelSpec}' matched multiple scoped models: ${exactMatches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
+              );
+            }
             const matches = scopedList.filter(
               (s) =>
                 s.model.id.toLowerCase().includes(lowerSpec) ||
@@ -313,7 +326,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
                   String(s.model.name).toLowerCase().includes(lowerSpec)) ||
                 s.model.provider.toLowerCase().includes(lowerSpec),
             );
-            let matched = exact;
+            let matched = exactMatches[0];
             if (!matched && matches.length === 1) {
               matched = matches[0];
             } else if (!matched && matches.length > 1) {
@@ -438,12 +451,30 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           if (disposed) return;
           disposed = true;
           if (!forceDisposed) {
+            let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
             try {
-              await session.extensionRunner.emit({
-                type: "session_shutdown",
-                reason: "quit",
-              });
-            } catch {}
+              let timedOut = false;
+              await Promise.race([
+                session.extensionRunner.emit({
+                  type: "session_shutdown",
+                  reason: "quit",
+                }),
+                new Promise<void>((resolve) => {
+                  shutdownTimer = setTimeout(() => {
+                    timedOut = true;
+                    resolve();
+                  }, 5000);
+                  shutdownTimer.unref();
+                }),
+              ]);
+              if (timedOut)
+                console.warn(
+                  `Timed out while shutting down subagent ${session.sessionId}`,
+                );
+            } catch {
+            } finally {
+              if (shutdownTimer) clearTimeout(shutdownTimer);
+            }
           }
           forceDispose();
         };
@@ -568,9 +599,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           throw new Error(
             `Subagent ${matching.sessionId} is not currently running`,
           );
-        if (completion !== undefined) matching.completion = completion;
         try {
           await matching.session.steer(message.trim());
+          if (completion !== undefined) matching.completion = completion;
         } catch (error) {
           if (!manager.jobs.has(matching.pid))
             throw new Error(`Subagent ${matching.sessionId} already finished`);
@@ -769,8 +800,13 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           removeFreshSessionFile();
           throw error;
         }
-        const targetSessionId =
-          existing?.sessionId ?? sessionManager.getSessionId();
+        const actualSessionId = sessionManager.getSessionId();
+        if (existing && actualSessionId !== existing.sessionId) {
+          throw new Error(
+            `Cannot resume subagent ${existing.sessionId}: session file contains ${actualSessionId}`,
+          );
+        }
+        const targetSessionId = existing?.sessionId ?? actualSessionId;
         try {
           sessionLock = acquireSessionLock(targetSessionId);
         } catch (lockError) {
@@ -807,8 +843,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         actualTools = prepared.actualTools;
         forceDisposeChild = prepared.forceDispose;
         disposeChild = async () => {
-          await prepared.dispose();
-          removeLock();
+          try {
+            await prepared.dispose();
+          } finally {
+            removeLock();
+          }
         };
         if (!session.model) {
           await disposeChild();
@@ -931,7 +970,32 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         throw error;
       }
 
+      const TOOL_ACTIVITY_HOLD_MS = 400;
+      let activityTimer: ReturnType<typeof setTimeout> | undefined;
+      let pendingActivity: string | undefined;
       const setActivity = (activity: string) => {
+        // Fast tools otherwise disappear between two widget refreshes. Keep
+        // the last tool visible briefly before returning to the generic state.
+        if (activity === "thinking" && job.activity?.startsWith("tool:")) {
+          pendingActivity = activity;
+          if (!activityTimer) {
+            activityTimer = setTimeout(() => {
+              activityTimer = undefined;
+              const next = pendingActivity;
+              pendingActivity = undefined;
+              if (next && job.activity !== next) {
+                job.activity = next;
+                manager.syncStatus(ctx);
+              }
+            }, TOOL_ACTIVITY_HOLD_MS);
+          }
+          return;
+        }
+        pendingActivity = undefined;
+        if (activityTimer) {
+          clearTimeout(activityTimer);
+          activityTimer = undefined;
+        }
         if (job.activity === activity) return;
         job.activity = activity;
         manager.syncStatus(ctx);
@@ -1009,28 +1073,34 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
                 "\n\nResult truncated; full output remains in the durable session file.";
             }
           }
+          const terminalFields = {
+            state,
+            durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+            updatedAt: new Date().toISOString(),
+          } as const;
           if (
             !manager.shuttingDown &&
             manager.generation === expectedGeneration
           ) {
-            job.record = {
-              ...manager.currentRecord(job),
-              state,
-              durationSec: Math.round((Date.now() - job.startedAt) / 1000),
-              updatedAt: new Date().toISOString(),
-            };
+            try {
+              job.record = {
+                ...manager.currentRecord(job),
+                ...terminalFields,
+              };
+            } catch (statsError) {
+              job.record = { ...job.record!, ...terminalFields };
+              reason ??= `Could not collect final subagent stats: ${statsError instanceof Error ? statsError.message : String(statsError)}`;
+            }
             try {
               saveRecord(job.record);
             } catch (recordError) {
               console.warn(`Could not save final subagent state:`, recordError);
               reason ??= `Could not save final subagent state: ${recordError instanceof Error ? recordError.message : String(recordError)}`;
             }
+          } else {
+            job.record = { ...job.record!, ...terminalFields };
           }
-          const completedRecord = job.record;
-          if (!completedRecord)
-            throw new Error(
-              `Missing durable record for subagent ${session.sessionId}`,
-            );
+          const completedRecord = job.record!;
           const usage = completedRecord.usage;
           const costText = usage.cost ? `, $${usage.cost.toFixed(4)}` : "";
           const badge = `\n\n— Subagent ${state} (${completedRecord.durationSec ?? 0}s, ${completedRecord.turns} turn${completedRecord.turns === 1 ? "" : "s"}, ${completedRecord.toolCount} tool${completedRecord.toolCount === 1 ? "" : "s"}${costText}) • Session: ${session.sessionId}`;
@@ -1059,6 +1129,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           }
         } finally {
           clearTimeout(timer);
+          if (activityTimer) clearTimeout(activityTimer);
           unsubscribe();
           await disposeChild();
           manager.jobs.delete(pid);

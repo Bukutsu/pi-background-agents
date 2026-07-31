@@ -27,6 +27,7 @@ import {
 } from "./utils.js";
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const WIDGET_REFRESH_MS = 200;
 
 export class JobManager {
   public jobs = new Map<number, BgJob>();
@@ -215,7 +216,8 @@ export class JobManager {
     active.ui.setWidget(
       "bg-subagents",
       (_tui, theme) => {
-        const frame = BRAILLE[Math.floor(Date.now() / 100) % BRAILLE.length];
+        const frame =
+          BRAILLE[Math.floor(Date.now() / WIDGET_REFRESH_MS) % BRAILLE.length];
         const bColor = (str: string) => theme.fg("dim", str);
         return {
           render(width: number) {
@@ -315,7 +317,10 @@ export class JobManager {
     );
 
     if (!this.widgetTimer) {
-      this.widgetTimer = setInterval(() => this.syncStatus(), 100);
+      this.widgetTimer = setInterval(
+        () => this.syncStatus(),
+        WIDGET_REFRESH_MS,
+      );
     }
   }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createLocalBashOperations,
@@ -42,6 +42,15 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       });
     let output = "";
     let outputTruncated = false;
+    const fullOutputLog = join(getLogDir(), `${randomUUID()}.log`);
+    let fullOutputAvailable = true;
+    let rawOutputWritten = false;
+    try {
+      writeFileSync(fullOutputLog, "", { mode: 0o600 });
+    } catch (error) {
+      fullOutputAvailable = false;
+      console.warn("Could not create background task output log:", error);
+    }
     const job: BgJob = {
       pid,
       command: shownCommand,
@@ -79,7 +88,20 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           timeout: timeoutSec,
           env,
           onData(data) {
-            const truncated = truncateTail(output + data.toString());
+            const text = data.toString();
+            if (fullOutputAvailable) {
+              try {
+                appendFileSync(fullOutputLog, text);
+                rawOutputWritten = true;
+              } catch (error) {
+                fullOutputAvailable = false;
+                console.warn(
+                  "Could not retain full background task output:",
+                  error,
+                );
+              }
+            }
+            const truncated = truncateTail(output + text);
             outputTruncated ||= truncated.truncated;
             output = truncated.content;
           },
@@ -100,13 +122,21 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
         cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
       let logFile = "";
       if (keepLog) {
+        logFile = fullOutputLog;
         try {
-          logFile = join(getLogDir(), `${randomUUID()}.log`);
-          writeFileSync(logFile, content || message, { mode: 0o600 });
+          if (!rawOutputWritten) {
+            writeFileSync(logFile, content || message, { mode: 0o600 });
+          } else if (message) {
+            appendFileSync(logFile, `\n\n${message}\n`);
+          }
         } catch (logError) {
           console.warn(`Could not save background task log:`, logError);
           logFile = "";
         }
+      } else {
+        try {
+          rmSync(fullOutputLog, { force: true });
+        } catch {}
       }
       const heading = timedOut
         ? `Background task timed out after ${timeoutSec} seconds`
@@ -118,7 +148,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
               ? "Background task finished"
               : "Background task failed";
       const result = content
-        ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Retained tail: ${logFile}` : ""}`
+        ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Full output: ${logFile}` : ""}`
         : "";
       const reason = failed
         ? `\n\nReason: ${message}`

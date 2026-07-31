@@ -4,6 +4,10 @@ Background shell jobs and SDK-native subagents for [Pi](https://pi.dev).
 
 `pi-background-agents` provides two tools: `bg` for non-blocking shell commands and `subagent` for running child Pi sessions in process with their own context and history.
 
+## Trust model
+
+This is a trusted-local developer tool, not a sandbox. `bg` runs shell commands with the parent environment, and subagents may inherit the parent session's active tools, including filesystem and shell access. Use it only with prompts, repositories, and providers you trust; use an OS/container sandbox separately when that boundary matters.
+
 ## Install
 
 ```bash

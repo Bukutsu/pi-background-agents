@@ -95,8 +95,62 @@ export function renderToolResult(
   return createMarkdownComponent(preview + hint, theme);
 }
 
+const TERMINAL_STATES = [
+  "finished",
+  "failed",
+  "stopped",
+  "timed-out",
+  "interrupted",
+] as const;
+
+export function isSubagentRecord(value: unknown): value is SubagentRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<SubagentRecord>;
+  const usage = record.usage;
+  return (
+    typeof record.sessionId === "string" &&
+    /^[a-zA-Z0-9-]+$/.test(record.sessionId) &&
+    typeof record.cwd === "string" &&
+    typeof record.sessionFile === "string" &&
+    typeof record.model === "string" &&
+    (record.thinking === undefined || typeof record.thinking === "string") &&
+    typeof record.label === "string" &&
+    typeof record.createdAt === "string" &&
+    typeof record.updatedAt === "string" &&
+    (record.state === "running" ||
+      TERMINAL_STATES.includes(
+        record.state as (typeof TERMINAL_STATES)[number],
+      )) &&
+    typeof record.turns === "number" &&
+    Number.isInteger(record.turns) &&
+    record.turns >= 0 &&
+    typeof record.toolCount === "number" &&
+    Number.isInteger(record.toolCount) &&
+    record.toolCount >= 0 &&
+    typeof record.toolFailures === "number" &&
+    Number.isInteger(record.toolFailures) &&
+    record.toolFailures >= 0 &&
+    !!usage &&
+    typeof usage === "object" &&
+    typeof usage.input === "number" &&
+    typeof usage.output === "number" &&
+    typeof usage.cacheRead === "number" &&
+    typeof usage.cacheWrite === "number" &&
+    typeof usage.total === "number" &&
+    typeof usage.cost === "number" &&
+    Array.isArray(record.inheritedTools) &&
+    record.inheritedTools.every((tool) => typeof tool === "string") &&
+    (record.durationSec === undefined ||
+      (typeof record.durationSec === "number" && record.durationSec >= 0)) &&
+    (record.branch === undefined || typeof record.branch === "string") &&
+    (record.context === "project" || record.context === "fork") &&
+    (record.ownerPid === undefined ||
+      (typeof record.ownerPid === "number" && record.ownerPid > 0))
+  );
+}
+
 export function readIndex(): Record<string, SubagentRecord> {
-  const records: Record<string, SubagentRecord> = {};
+  const records: Record<string, SubagentRecord> = Object.create(null);
   if (!existsSync(SUBAGENT_INDEX)) return records;
   try {
     for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
@@ -104,25 +158,8 @@ export function readIndex(): Record<string, SubagentRecord> {
       try {
         const record = JSON.parse(
           readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8"),
-        ) as SubagentRecord;
-        if (
-          !record ||
-          typeof record.sessionId !== "string" ||
-          !/^[a-zA-Z0-9-]+$/.test(record.sessionId) ||
-          typeof record.cwd !== "string" ||
-          typeof record.sessionFile !== "string" ||
-          typeof record.model !== "string" ||
-          typeof record.label !== "string" ||
-          ![
-            "running",
-            "finished",
-            "failed",
-            "stopped",
-            "timed-out",
-            "interrupted",
-          ].includes(record.state)
-        )
-          throw new Error("invalid record");
+        ) as unknown;
+        if (!isSubagentRecord(record)) throw new Error("invalid record");
         records[record.sessionId] = record;
       } catch (error) {
         console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
