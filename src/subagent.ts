@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
-  mkdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -10,6 +9,8 @@ import {
 import { join, sep } from "node:path";
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
@@ -40,7 +41,6 @@ import {
   ensurePrivateDir,
   extractTextContent,
   getScopedModels,
-  getSubagentHeading,
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
@@ -118,7 +118,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           description: "Action (default: spawn)",
         }),
       ),
-      prompt: Type.Optional(Type.String({ description: "Task for spawn" })),
+      prompt: Type.Optional(
+        Type.String({ description: "Task for spawn or resume" }),
+      ),
       description: Type.Optional(
         Type.String({ description: "Short job label" }),
       ),
@@ -242,7 +244,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       // ── setupChildSession: child-session setup for spawn ──
       // Model resolution, tool allowlist, session creation, and extension
       // binding. Divergent orchestration (locks, worktrees, fork/resume,
-      // durable records) stays in the callers.
+      // durable records) stays in the spawn path.
       type ChildSetupOptions = {
         cwd: string;
         model?: string;
@@ -341,7 +343,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
           );
         const childTools = requestedTools ?? parentTools;
-        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true });
         ensurePrivateDir(SUBAGENT_SESSION_DIR);
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
@@ -361,6 +362,24 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
             : undefined);
         checkSetup?.();
+        const trusted = ctx.isProjectTrusted();
+        const settingsManager = SettingsManager.create(opts.cwd, undefined, {
+          // Children only load project resources when the parent already
+          // trusted this checkout; never by default.
+          projectTrusted: trusted,
+        });
+        let resourceLoader: DefaultResourceLoader | undefined;
+        if (!trusted) {
+          // Untrusted children must not inherit project instructions
+          // (AGENTS.md / CLAUDE.md) either.
+          resourceLoader = new DefaultResourceLoader({
+            cwd: opts.cwd,
+            agentDir: getAgentDir(),
+            settingsManager,
+            noContextFiles: true,
+          });
+          await resourceLoader.reload();
+        }
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
         try {
@@ -370,11 +389,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             excludeTools: ["bg", "subagent"],
             modelRuntime: runtime,
             sessionManager: opts.sessionManager,
-            settingsManager: SettingsManager.create(opts.cwd, undefined, {
-              // Children only load project resources when the parent already
-              // trusted this checkout; never by default.
-              projectTrusted: ctx.isProjectTrusted(),
-            }),
+            settingsManager,
+            ...(resourceLoader ? { resourceLoader } : {}),
             ...(selectedModel ? { model: selectedModel } : {}),
             ...(!existing
               ? { thinkingLevel: effectiveThinking as ThinkingLevel }
@@ -618,7 +634,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         childCwd = created.path;
         branch = created.branch;
         isNewWorktree = true;
-        checkSetup();
       } else {
         childCwd = resolveSubagentCwd(ctx.cwd, cwd);
       }
@@ -633,22 +648,34 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
       try {
         checkSetup();
-        const sessionManager = existing
-          ? SessionManager.open(
-              existing.sessionFile,
-              SUBAGENT_SESSION_DIR,
-              childCwd,
-            )
-          : SessionManager.create(
-              childCwd,
-              SUBAGENT_SESSION_DIR,
-              context === "fork"
-                ? { parentSession: ctx.sessionManager.getSessionFile() }
-                : undefined,
-            );
-        if (!existing && context === "fork")
-          for (const parentMessage of sanitizeForkMessages(ctx))
-            sessionManager.appendMessage(parentMessage as any);
+        let sessionManager!: SessionManager;
+        try {
+          sessionManager = existing
+            ? SessionManager.open(
+                existing.sessionFile,
+                SUBAGENT_SESSION_DIR,
+                childCwd,
+              )
+            : SessionManager.create(
+                childCwd,
+                SUBAGENT_SESSION_DIR,
+                context === "fork"
+                  ? { parentSession: ctx.sessionManager.getSessionFile() }
+                  : undefined,
+              );
+          if (!existing && context === "fork")
+            for (const parentMessage of sanitizeForkMessages(ctx))
+              sessionManager.appendMessage(parentMessage as any);
+        } catch (error) {
+          // A fresh session may have written its file before setup failed;
+          // remove it so nothing orphaned accumulates.
+          if (!existing) {
+            try {
+              rmSync(sessionManager?.getSessionFile() ?? "", { force: true });
+            } catch {}
+          }
+          throw error;
+        }
         const targetSessionId =
           existing?.sessionId ?? sessionManager.getSessionId();
         try {
@@ -805,7 +832,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         baseline: session.getSessionStats(),
         record,
         toolFailures: 0,
-        activeTools,
       };
       try {
         manager.jobs.set(pid, job);
@@ -926,7 +952,14 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             state === "finished"
               ? ""
               : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
-          const header = `${getSubagentHeading(reason || (failed ? "failed" : undefined), timedOut, stopped)}: ${label}`;
+          const heading = timedOut
+          ? "Background subagent timed out"
+          : stopped
+            ? "Background subagent was stopped"
+            : reason || failed
+              ? "Background subagent failed"
+              : "Background subagent finished";
+        const header = `${heading}: ${label}`;
           const mainContent = truncated.content
             ? `\n\n${truncated.content}`
             : "";
@@ -946,7 +979,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           manager.syncStatus(ctx);
         }
       })();
-      job.done = manager.track(done);
+      manager.track(done);
 
       const location = branch ? `\nBranch: ${branch}` : "";
       const queueMsg =
@@ -978,7 +1011,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         },
       };
     },
-    renderCall(args, theme, _context) {
+    renderCall(args, theme) {
       const action = args.action ?? "spawn";
       if (action === "status")
         return new Text(
@@ -1023,7 +1056,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         0,
       );
     },
-    renderResult(result, options, theme, _context) {
+    renderResult(result, options, theme) {
       return renderToolResult(result, options, theme, 10);
     },
   });

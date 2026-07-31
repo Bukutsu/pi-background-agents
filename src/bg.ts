@@ -71,7 +71,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     }
     if (ctx.thinkingLevel) env.PI_REASONING_LEVEL = ctx.thinkingLevel;
 
-    job.done = manager.track(
+    manager.track(
       createLocalBashOperations()
         .exec(command, ctx.cwd, {
           signal: controller.signal,
@@ -139,7 +139,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       content: [
         {
           type: "text" as const,
-          text: `Started shell job ${pid}: ${shownCommand}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode). If you exit before prompting, check /bg for the saved output." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use /bg to view or stop the task.`,
+          text: `Started shell job ${pid}: ${shownCommand}\n${completion === "queue" ? "Result will be delivered on your next prompt (queue mode)." : "The result will arrive automatically. Continue other work; do not wait, sleep, or poll."} Use /bg to view or stop the task.`,
         },
       ],
       details: { pid },
@@ -276,7 +276,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       if (!command?.trim()) throw new Error("command is required for spawn");
       return runBgProcess(command.trim(), timeoutSec, ctx, completion);
     },
-    renderCall(args, theme, _context) {
+    renderCall(args, theme) {
       const action = args.action ?? "spawn";
       if (action === "status")
         return new Text(
@@ -302,7 +302,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
         0,
       );
     },
-    renderResult(result, options, theme, _context) {
+    renderResult(result, options, theme) {
       return renderToolResult(result, options, theme, 8);
     },
   });

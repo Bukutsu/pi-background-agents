@@ -80,15 +80,6 @@ export function renderToolResult(
   return createMarkdownComponent(preview + hint, theme);
 }
 
-export const STATE_ICONS: Record<string, string> = {
-  running: "●",
-  finished: "✓",
-  failed: "✖",
-  "timed-out": "✖",
-  interrupted: "✖",
-  stopped: "✖",
-};
-
 export function readIndex(): Record<string, SubagentRecord> {
   const records: Record<string, SubagentRecord> = {};
   if (!existsSync(SUBAGENT_INDEX)) return records;
@@ -283,21 +274,6 @@ export function acquireSessionLock(sessionId: string) {
   throw new Error(`Could not acquire subagent session lock: ${sessionId}`);
 }
 
-export function getSubagentHeading(
-  error?: string,
-  timedOut = false,
-  cancelled = false,
-) {
-  return timedOut
-    ? "Background subagent timed out"
-    : cancelled
-      ? "Background subagent was stopped"
-      : error
-        ? "Background subagent failed"
-        : "Background subagent finished";
-}
-
-// ponytail: scopedModels only exists on pi >=0.83.0; guard so older hosts fall through to resolveCliModel
 export function getScopedModels(ctx: ExtensionContext) {
   return "scopedModels" in ctx
     ? (

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import type {
   ExtensionAPI,

@@ -8,9 +8,15 @@ import {
   visibleWidth,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
-import type { BgJob, SubagentRecord } from "./types.js";
+import {
+  SUBAGENT_DIR,
+  SUBAGENT_SESSION_DIR,
+  type BgJob,
+  type SubagentRecord,
+} from "./types.js";
 import {
   createMarkdownComponent,
+  ensurePrivateDir,
   extractTextContent,
   getScopedModels,
   processIsAlive,
@@ -39,6 +45,11 @@ export class JobManager {
   constructor(public pi: ExtensionAPI) {}
 
   public init() {
+    // Ensure storage roots are private before anything writes into them
+    // (SessionManager would otherwise create them with default perms).
+    ensurePrivateDir(SUBAGENT_DIR);
+    ensurePrivateDir(SUBAGENT_SESSION_DIR);
+
     for (const record of Object.values(readIndex())) {
       if (record.state === "running" && !processIsAlive(record.ownerPid)) {
         record.state = "interrupted";

@@ -61,8 +61,6 @@ export interface BgJob {
   baseline?: SessionStats;
   record?: SubagentRecord;
   toolFailures?: number;
-  activeTools?: Map<string, string>;
-  done?: Promise<void>;
   completion?: "queue" | "continue";
   stoppedManually?: boolean;
 }

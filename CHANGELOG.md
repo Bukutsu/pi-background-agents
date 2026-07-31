@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+- Security: untrusted children no longer load project `AGENTS.md`/`CLAUDE.md` context files (loader now built with `noContextFiles` when the parent hasn't trusted the checkout).
+- Security: storage roots (`<agent-dir>/pi-bg`, `sessions`) are chmod'ed 0700 at startup before SessionManager can create them with default perms.
+- Fix: a shutdown landing between worktree creation and session setup no longer leaks the worktree/branch (guard moved inside the cleanup boundary).
+- Fix: a fork whose session file was written before a sanitize/append failure no longer leaves an orphaned file.
+- Cleanup: inlined `getSubagentHeading`, dropped write-only `BgJob.done`/`activeTools` fields, dropped redundant `mkdirSync`/`_context` params, sync entrypoint, `STATE_ICONS` export removed.
+- Docs: `/bg` queue-mode no longer promises recoverable output after exit; status wording says non-active sessions.
+
 ## 0.4.2
 
 - Removed the foreground `chain` workflow (the last blocking path in a package built for backgrounding; the parent model can pass a prior subagent's output into the next spawn's prompt).
