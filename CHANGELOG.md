@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.8
+
+- Security: subagent model overrides are restricted to active `scopedModels`; when no active model scope exists, requested models fall back to the parent model instead of arbitrary provider resolution.
+
 ## 0.4.7
 
 - Security: sanitize replayed `pi-bg-result` messages at the custom renderer boundary.

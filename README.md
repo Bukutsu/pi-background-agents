@@ -48,21 +48,21 @@ A `spawn` call returns immediately. Pi receives the child's final response when 
 
 Parameters:
 
-| Name          | Default                                         | Purpose                                                                                                                                                      |
-| ------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `action`      | `"spawn"`                                       | `spawn`, `status`, `steer`, or `stop`                                                                                                                        |
-| `prompt`      |                                                 | Task for a new or resumed session                                                                                                                            |
-| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status                                                                                                                                  |
-| `sessionId`   | New ID                                          | Resume, inspect, steer, or stop a child                                                                                                                      |
-| `message`     |                                                 | Guidance queued after the child's current turn (steer only)                                                                                                  |
-| `completion`  | `"continue"`                                    | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                                          |
-| `model`       | Parent, scoped, or saved model                  | Model ID or provider/model specifier; if omitted on new subagents, selects from Pi's active `scopedModels` list; on resume, restores the child's saved model |
-| `thinking`    | Parent or saved level                           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                                                 |
-| `tools`       | Parent tools                                    | Comma-separated allowlist that can only reduce access                                                                                                        |
-| `cwd`         | Parent directory                                | Existing directory inside the parent project                                                                                                                 |
-| `worktree`    | `false`                                         | Create a branch and worktree for a new child                                                                                                                 |
-| `context`     | `"project"`                                     | `project` starts fresh; `fork` copies the current parent context                                                                                             |
-| `timeoutSec`  | `600`                                           | Child timeout                                                                                                                                                |
+| Name          | Default                                         | Purpose                                                                                                                               |
+| ------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`      | `"spawn"`                                       | `spawn`, `status`, `steer`, or `stop`                                                                                                 |
+| `prompt`      |                                                 | Task for a new or resumed session                                                                                                     |
+| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status                                                                                                           |
+| `sessionId`   | New ID                                          | Resume, inspect, steer, or stop a child                                                                                               |
+| `message`     |                                                 | Guidance queued after the child's current turn (steer only)                                                                           |
+| `completion`  | `"continue"`                                    | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                   |
+| `model`       | Parent, scoped, or saved model                  | Override from the active `scopedModels` scope; without a scope, the parent model is used; on resume, restores the child's saved model |
+| `thinking`    | Parent or saved level                           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                          |
+| `tools`       | Parent tools                                    | Comma-separated allowlist that can only reduce access                                                                                 |
+| `cwd`         | Parent directory                                | Existing directory inside the parent project                                                                                          |
+| `worktree`    | `false`                                         | Create a branch and worktree for a new child                                                                                          |
+| `context`     | `"project"`                                     | `project` starts fresh; `fork` copies the current parent context                                                                      |
+| `timeoutSec`  | `600`                                           | Child timeout                                                                                                                         |
 
 ### Parallel edits
 
@@ -103,10 +103,9 @@ A resumed child returns to its saved directory and restores its model and thinki
 
 When spawning a new subagent without an explicit `model` parameter:
 
-- `subagent` dynamically evaluates Pi's active `scopedModels` list at call time.
-- If the parent session's current model has a matching scoped model entry, the child inherits that entry.
-- If no direct match exists, it uses the parent's active model or the default scoped model.
-- If you change your scoped models or switch active models mid-session, subsequent subagent spawns automatically evaluate and use your updated model configuration.
+- `subagent` evaluates Pi's active `scopedModels` list when the host exposes one.
+- Explicit model overrides are accepted only within that active scope; without a scope, the child uses the parent's current model.
+- If you change your scoped models or switch active models mid-session, subsequent subagent spawns use the current configuration.
 
 ### Status and control
 

@@ -12,7 +12,6 @@ import {
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
-  resolveCliModel,
   SessionManager,
   SettingsManager,
   truncateTail,
@@ -152,7 +151,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       model: Type.Optional(
         Type.String({
           description:
-            "Preferred model; omitted on resume to restore the saved model",
+            "Model override from the active scope; without a scope, the parent model is used; omitted on resume to restore the saved model",
         }),
       ),
       thinking: Type.Optional(
@@ -328,16 +327,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
             }
           } else {
-            const resolved = resolveCliModel({
-              cliModel: modelSpec,
-              cliThinking: opts.thinking,
-              modelRuntime: runtime,
-            });
-            if (resolved.error) throw new Error(resolved.error);
-            if (resolved.warning) console.warn(resolved.warning);
-            resolvedModel = resolved.model;
-            resolvedThinking = resolved.thinkingLevel as
-              ThinkingLevel | undefined;
+            console.warn(
+              `Ignoring requested model '${modelSpec}': no active model scope; using the parent model`,
+            );
           }
         }
         const parentTools = pi
