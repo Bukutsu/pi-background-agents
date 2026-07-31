@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import {
   createLocalBashOperations,
   truncateTail,
@@ -17,9 +18,26 @@ import type { BgJob } from "./types.js";
 import { getLogDir } from "./types.js";
 import { renderToolResult, sanitizeTerminalOutput } from "./utils.js";
 
+const MAX_FULL_OUTPUT_BYTES = 10 * 1024 * 1024;
+const SAFE_ENV_KEYS = new Set([
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TERM",
+  "COLORTERM",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "CI",
+  "NO_COLOR",
+  "FORCE_COLOR",
+]);
+
 export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   const MAX_CMD_LEN = 120;
-  function runBgProcess(
+  async function runBgProcess(
     command: string,
     timeoutSec: number,
     ctx: ExtensionContext,
@@ -32,6 +50,15 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       safeCommand.length > MAX_CMD_LEN
         ? `${safeCommand.slice(0, MAX_CMD_LEN - 3)}...`
         : safeCommand;
+    if (
+      ctx.hasUI &&
+      !(await ctx.ui.confirm(
+        "Run background command?",
+        `This runs shell commands with your user permissions:\n${shownCommand}`,
+      ))
+    ) {
+      throw new Error("Background command was not approved");
+    }
     const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
     const abortFromShutdown = () => controller.abort();
@@ -44,6 +71,8 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     let outputTruncated = false;
     const fullOutputLog = join(getLogDir(), `${randomUUID()}.log`);
     let fullOutputAvailable = true;
+    let fullOutputBytes = 0;
+    let fullOutputTruncated = false;
     let rawOutputWritten = false;
     try {
       writeFileSync(fullOutputLog, "", { mode: 0o600 });
@@ -62,16 +91,22 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     manager.jobs.set(pid, job);
     manager.syncStatus(ctx);
 
-    // Drop stale launcher PI_* values first, then set this session's.
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    for (const key of [
-      "PI_SESSION_ID",
-      "PI_SESSION_FILE",
-      "PI_PROVIDER",
-      "PI_MODEL",
-      "PI_REASONING_LEVEL",
-    ])
-      delete env[key];
+    // Pass only the execution environment a local command normally needs;
+    // credentials, shell hooks, and loader overrides stay out of child jobs.
+    const env: NodeJS.ProcessEnv = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => SAFE_ENV_KEYS.has(key) || key.startsWith("LC_"),
+      ),
+    );
+    env.PATH = [
+      dirname(process.execPath),
+      join(homedir(), ".local", "bin"),
+      join(homedir(), ".bun", "bin"),
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      "/bin",
+    ].join(delimiter);
     env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
     if (ctx.sessionManager.getSessionFile())
       env.PI_SESSION_FILE = ctx.sessionManager.getSessionFile();
@@ -91,8 +126,17 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
             const text = data.toString();
             if (fullOutputAvailable) {
               try {
-                appendFileSync(fullOutputLog, text);
-                rawOutputWritten = true;
+                const bytes = Buffer.from(text);
+                const remaining = MAX_FULL_OUTPUT_BYTES - fullOutputBytes;
+                if (remaining <= 0) {
+                  fullOutputTruncated = true;
+                } else {
+                  const retained = bytes.subarray(0, remaining);
+                  appendFileSync(fullOutputLog, retained);
+                  fullOutputBytes += retained.length;
+                  rawOutputWritten ||= retained.length > 0;
+                  fullOutputTruncated ||= retained.length < bytes.length;
+                }
               } catch (error) {
                 fullOutputAvailable = false;
                 console.warn(
@@ -119,19 +163,37 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       const failed = Boolean(error) && !cancelled && !timedOut;
       const content = sanitizeTerminalOutput(output.trim());
       const keepLog =
-        cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
+        cancelled ||
+        timedOut ||
+        failed ||
+        exitCode !== 0 ||
+        outputTruncated ||
+        fullOutputTruncated;
       let logFile = "";
       if (keepLog) {
-        logFile = fullOutputLog;
-        try {
-          if (!rawOutputWritten) {
-            writeFileSync(logFile, content || message, { mode: 0o600 });
-          } else if (message) {
-            appendFileSync(logFile, `\n\n${message}\n`);
+        if (fullOutputAvailable) {
+          logFile = fullOutputLog;
+          try {
+            if (!rawOutputWritten) {
+              writeFileSync(logFile, content || message, { mode: 0o600 });
+            } else if (message) {
+              appendFileSync(logFile, `\n\n${message}\n`);
+            }
+          } catch (logError) {
+            console.warn(`Could not save background task log:`, logError);
+            logFile = "";
           }
-        } catch (logError) {
-          console.warn(`Could not save background task log:`, logError);
-          logFile = "";
+        } else {
+          try {
+            logFile = join(getLogDir(), `${randomUUID()}.log`);
+            writeFileSync(logFile, content || message, { mode: 0o600 });
+          } catch (logError) {
+            console.warn(
+              `Could not save retained background task output:`,
+              logError,
+            );
+            logFile = "";
+          }
         }
       } else {
         try {
@@ -147,9 +209,14 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
             : exitCode === 0
               ? "Background task finished"
               : "Background task failed";
-      const result = content
-        ? `\n\nResult:\n${content}${outputTruncated ? `\n\nThe result was shortened. Full output: ${logFile}` : ""}`
-        : "";
+      const outputLogNote = outputTruncated
+        ? fullOutputTruncated
+          ? `\n\nThe result was shortened. Retained output log (capped at ${MAX_FULL_OUTPUT_BYTES} bytes): ${logFile}`
+          : `\n\nThe result was shortened. Full output: ${logFile}`
+        : fullOutputTruncated
+          ? `\n\nThe output log is capped at ${MAX_FULL_OUTPUT_BYTES} bytes: ${logFile}`
+          : "";
+      const result = content ? `\n\nResult:\n${content}${outputLogNote}` : "";
       const reason = failed
         ? `\n\nReason: ${message}`
         : exitCode
@@ -157,7 +224,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           : "";
       if (!job.stoppedManually) {
         manager.deliverCompletion(
-          `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
+          `${heading}\nTask: ${shownCommand}${reason}${result}${keepLog && logFile ? `\n\nTroubleshooting log: ${logFile}` : ""}`,
           job.completion ?? "continue",
           expectedGeneration,
         );

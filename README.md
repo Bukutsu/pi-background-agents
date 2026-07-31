@@ -6,7 +6,7 @@ Background shell jobs and SDK-native subagents for [Pi](https://pi.dev).
 
 ## Trust model
 
-This is a trusted-local developer tool, not a sandbox. `bg` runs shell commands with the parent environment, and subagents may inherit the parent session's active tools, including filesystem and shell access. Use it only with prompts, repositories, and providers you trust; use an OS/container sandbox separately when that boundary matters.
+This is a trusted-local developer tool, not a sandbox. `bg` asks for approval when a UI is available and passes a reduced environment. Subagents intentionally inherit all active parent tools, including shell and filesystem tools, so use them only with prompts, repositories, and providers you trust. Use an OS/container sandbox separately when that boundary matters.
 
 ## Install
 
@@ -16,7 +16,7 @@ pi install git:github.com/Bukutsu/pi-background-agents
 
 ## `bg`
 
-Use `bg` for long-running commands like test suites, builds, package installs, and local dev servers.
+Use `bg` for long-running commands like test suites, builds, package installs, and local dev servers. Interactive sessions ask before running the command; trusted non-interactive sessions may run it directly.
 
 ```json
 { "command": "npm run build", "timeoutSec": 300 }
@@ -34,7 +34,7 @@ Parameters:
 | `pid`        |              | Job ID for `stop`                                                   |
 | `timeoutSec` | `600`        | Timeout in seconds (1 to 2,147,483)                                 |
 
-Output is limited to 50 KB or 2,000 lines. Truncated or failed jobs save their full output to a private log file in a temporary directory.
+Displayed output is limited to 50 KB or 2,000 lines. Truncated or failed jobs save output to a private temporary log capped at 10 MB.
 
 ## `subagent`
 
@@ -62,7 +62,7 @@ Parameters:
 | `completion`  | `"continue"`                | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                |
 | `model`       | Parent model                | Model override validated against `scopedModels`; falls back to parent model if no scope is active; on resume, restores saved model |
 | `thinking`    | Parent thinking level       | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                       |
-| `tools`       | Parent active tools         | Comma-separated tool list (can only reduce access)                                                                                 |
+| `tools`       | Parent active tools         | Comma-separated tool list; omit it to inherit every active parent tool                                                             |
 | `cwd`         | Parent directory            | Directory path inside the parent project                                                                                           |
 | `worktree`    | `false`                     | Create a Git branch and worktree for parallel edits                                                                                |
 | `context`     | `"project"`                 | `project` starts a fresh context; `fork` copies the parent's context                                                               |
@@ -122,15 +122,15 @@ Resuming reopens the child's directory and restores its saved model and thinking
 { "action": "stop", "sessionId": "<session-id>" }
 ```
 
-Running `status` returns active subagents and up to 5 recently updated non-active sessions. The rendered table displays model, thinking level, status, activity, turn count, tool calls and failures, duration, and cost. The machine-readable output includes directory path, token counts, and session file path.
+Running `status` returns active subagents and up to 5 recently updated non-active sessions. The rendered table displays model, thinking level, status, activity, turn count, tool calls and failures, duration, and cost. The machine-readable output includes model, token counts, and tool metadata; session files and absolute working directories are kept private. Treat the remaining metadata as local sensitive data.
 
 Steering queues a message for the child to process after its current turn completes.
 
 ## Tool inheritance
 
-Children inherit the parent's active tools and discover tools in their own working directory. Built-in tools and extension tools carry over if present in the child directory. `bg` and `subagent` are stripped from children to prevent recursive delegation.
+Children intentionally inherit every active parent tool, including built-in, filesystem, shell, and extension tools. This is the designed power model; recursive `bg` and `subagent` use is also available, so prompts should prevent unwanted delegation.
 
-Passing a `tools` parameter restricts the child to the specified subset of active parent tools.
+Passing a `tools` parameter explicitly narrows the inherited parent tool set.
 
 Child extensions follow Pi's print-mode lifecycle. Reloading the parent extension or switching sessions stops running jobs and discards stale completion messages.
 
@@ -147,7 +147,7 @@ Run `/bg` to list or stop active background tasks:
 
 ## Environment variables
 
-Commands run through `bg` receive the parent environment plus session identity variables, with launcher variables refreshed:
+Commands run through `bg` receive a reduced environment plus session identity variables, with launcher variables refreshed. Credentials and shell-loader overrides are not forwarded:
 
 | Variable             | Value                     |
 | -------------------- | ------------------------- |
@@ -182,7 +182,7 @@ The package stays focused on background execution. The following choices ensure 
 - Preserve partial output. When a run aborts or encounters an error, text produced before the failure remains available.
 - Reconcile stale runs via process IDs. PID checks distinguish active children from leftover `running` records after a crash.
 - Leave worktrees on disk. Automatic cleanup risks deleting uncommitted edits.
-- Block `bg` and `subagent` inside children. Disabling nested delegation keeps task ownership clear and prevents infinite loops.
+- Preserve full parent tool inheritance by design. Callers can narrow tools when they need tighter task boundaries.
 
 ## Contributing
 

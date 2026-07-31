@@ -13,6 +13,8 @@ function setup() {
     registerMessageRenderer() {},
     getActiveTools: () => ["read", "bash", "bg", "subagent"],
   };
+  let killAllCalls = 0;
+  let syncCalls = 0;
   const manager: any = {
     jobs: new Map(),
     generation: 0,
@@ -21,18 +23,31 @@ function setup() {
     currentCtx: undefined,
     shuttingDown: false,
     guard() {},
-    syncStatus() {},
+    syncStatus() {
+      syncCalls++;
+    },
     track: (promise: Promise<void>) => promise,
+    trackSetup: () => () => {},
     deliverCompletion() {},
     killJob: () => false,
+    killAllJobs: () => {
+      killAllCalls++;
+      return 2;
+    },
   };
   registerBgModule(pi, manager);
   registerSubagentModule(pi, manager);
-  return { tools, commands };
+  return {
+    tools,
+    commands,
+    manager,
+    getKillAllCalls: () => killAllCalls,
+    getSyncCalls: () => syncCalls,
+  };
 }
 
 test("registers bg and subagent status tools", async () => {
-  const { tools, commands } = setup();
+  const { tools, commands, manager, getKillAllCalls, getSyncCalls } = setup();
   const bg = tools.find((tool) => tool.name === "bg");
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(bg);
@@ -65,4 +80,19 @@ test("registers bg and subagent status tools", async () => {
     ctx,
   );
   assert.match(subagentStatus.content[0].text, /No matching subagent sessions/);
+
+  let notification = "";
+  const bgCommand = commands.find((command) => command.name === "bg");
+  await bgCommand.command.handler("kill all", {
+    ...ctx,
+    ui: {
+      notify: (message: string) => {
+        notification = message;
+      },
+    },
+  });
+  assert.equal(getKillAllCalls(), 1);
+  assert.equal(notification, "Stopped 2 background jobs");
+  assert.equal(getSyncCalls(), 1);
+  assert.equal(manager.killAllJobs instanceof Function, true);
 });

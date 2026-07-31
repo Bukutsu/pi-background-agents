@@ -37,6 +37,7 @@ export class JobManager {
   public shuttingDown = true;
   public lifecycle = new AbortController();
   public pending = new Set<Promise<void>>();
+  private pendingSetups = new Set<AbortController>();
   private widgetTimer: ReturnType<typeof setInterval> | undefined;
   private pendingCompletions: Array<{
     message: string;
@@ -396,16 +397,27 @@ export class JobManager {
 
   public killJob(pid: number): boolean {
     const job = this.jobs.get(pid);
-    if (!job) return false;
+    if (!job || job.controller.signal.aborted) return false;
     job.stoppedManually = true;
     job.controller.abort();
     return true;
+  }
+
+  public trackSetup(controller: AbortController) {
+    this.pendingSetups.add(controller);
+    return () => this.pendingSetups.delete(controller);
   }
 
   public killAllJobs(): number {
     let stopped = 0;
     for (const pid of this.jobs.keys()) {
       if (this.killJob(pid)) stopped++;
+    }
+    for (const controller of this.pendingSetups) {
+      if (!controller.signal.aborted) {
+        controller.abort();
+        stopped++;
+      }
     }
     return stopped;
   }

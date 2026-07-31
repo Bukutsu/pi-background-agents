@@ -58,7 +58,12 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
   function statusDetails(record: SubagentRecord, job?: BgJob) {
     const current = job ? manager.currentRecord(job) : record;
-    const { ownerPid: _, ...details } = current;
+    const {
+      ownerPid: _ownerPid,
+      sessionFile: _sessionFile,
+      cwd: _cwd,
+      ...details
+    } = current;
     return {
       ...details,
       ...(job?.activity ? { activity: job.activity } : {}),
@@ -351,9 +356,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             console.warn(modelRequestWarning);
           }
         }
-        const parentTools = pi
-          .getActiveTools()
-          .filter((name) => name !== "bg" && name !== "subagent");
+        const parentTools = pi.getActiveTools();
         const requestedTools = opts.tools
           ?.split(",")
           .map((tool) => tool.trim())
@@ -416,7 +419,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           created = await createAgentSession({
             cwd: opts.cwd,
             tools: childTools,
-            excludeTools: ["bg", "subagent"],
             modelRuntime: runtime,
             sessionManager: opts.sessionManager,
             settingsManager,
@@ -516,12 +518,25 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           throw new Error("Subagent session did not initialize a model");
         }
         const actualTools = session.getActiveToolNames();
-        const missingTools =
-          requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
-        if (missingTools.length) {
+        const missingTools = childTools.filter(
+          (name) => !actualTools.includes(name),
+        );
+        const unexpectedTools = actualTools.filter(
+          (name) => !childTools.includes(name),
+        );
+        if (missingTools.length || unexpectedTools.length) {
           await dispose();
           throw new Error(
-            `Requested tools were not available in the child: ${missingTools.join(", ")}`,
+            [
+              missingTools.length
+                ? `Requested parent tools were not available in the child: ${missingTools.join(", ")}`
+                : "",
+              unexpectedTools.length
+                ? `Child enabled unexpected tools: ${unexpectedTools.join(", ")}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("; "),
           );
         }
         const modelFallbackMessage = [
@@ -620,9 +635,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       if (!prompt?.trim()) throw new Error("prompt is required for spawn");
       const expectedGeneration = manager.generation;
       manager.guard(expectedGeneration);
+      const setupController = new AbortController();
       const setupSignal = AbortSignal.any([
         ...(signal ? [signal] : []),
         manager.lifecycle.signal,
+        setupController.signal,
       ]);
       const checkSetup = () => {
         manager.guard(expectedGeneration);
@@ -642,11 +659,39 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         throw new Error(
           "context:fork is only valid for a new subagent session",
         );
-
+      const releaseSetup = manager.trackSetup(setupController);
+      let setupReleased = false;
+      const releaseTrackedSetup = () => {
+        if (!setupReleased) {
+          setupReleased = true;
+          releaseSetup();
+        }
+      };
+      if (context === "fork") {
+        if (!ctx.hasUI) {
+          releaseTrackedSetup();
+          throw new Error("context:fork requires interactive approval");
+        }
+        try {
+          if (
+            !(await ctx.ui.confirm(
+              "Fork parent context?",
+              "This copies the parent conversation and tool output into a child session.",
+            ))
+          )
+            throw new Error("Forked context was not approved");
+        } catch (error) {
+          releaseTrackedSetup();
+          throw error;
+        }
+      }
       let finishSetup!: () => void;
       manager.track(
         new Promise<void>((resolve) => {
-          finishSetup = resolve;
+          finishSetup = () => {
+            releaseTrackedSetup();
+            resolve();
+          };
         }),
       );
       let existing: SubagentRecord | undefined;
@@ -780,6 +825,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           } catch {}
         };
         try {
+          if (existing) sessionLock = acquireSessionLock(existing.sessionId);
           sessionManager = existing
             ? SessionManager.open(
                 existing.sessionFile,
@@ -796,22 +842,17 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           if (!existing && context === "fork")
             for (const parentMessage of sanitizeForkMessages(ctx))
               sessionManager.appendMessage(parentMessage as any);
+          const actualSessionId = sessionManager.getSessionId();
+          if (existing && actualSessionId !== existing.sessionId) {
+            throw new Error(
+              `Cannot resume subagent ${existing.sessionId}: session file contains ${actualSessionId}`,
+            );
+          }
+          if (!existing) sessionLock = acquireSessionLock(actualSessionId);
         } catch (error) {
+          removeLock();
           removeFreshSessionFile();
           throw error;
-        }
-        const actualSessionId = sessionManager.getSessionId();
-        if (existing && actualSessionId !== existing.sessionId) {
-          throw new Error(
-            `Cannot resume subagent ${existing.sessionId}: session file contains ${actualSessionId}`,
-          );
-        }
-        const targetSessionId = existing?.sessionId ?? actualSessionId;
-        try {
-          sessionLock = acquireSessionLock(targetSessionId);
-        } catch (lockError) {
-          removeFreshSessionFile();
-          throw lockError;
         }
         let prepared: Awaited<ReturnType<typeof setupChildSession>> | undefined;
         try {
@@ -887,7 +928,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         throw setupError;
       }
 
-      finishSetup();
       const pid = manager.nextVirtualPid++;
       let timedOut = false;
       let cancelled = false;
@@ -960,13 +1000,18 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         };
         manager.jobs.set(pid, job);
         saveRecord(record);
+        checkSetup();
+        finishSetup();
       } catch (error) {
-        await disposeChild();
+        try {
+          await disposeChild();
+        } catch {}
         manager.jobs.delete(pid);
         removeFreshSessionFile();
         if (isNewWorktree) {
           await removeWorktree(pi, ctx.cwd, childCwd, branch);
         }
+        finishSetup();
         throw error;
       }
 
@@ -1153,10 +1198,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         details: {
           pid,
           sessionId: session.sessionId,
-          sessionFile,
           model: displayModel,
           thinking: session.thinkingLevel,
-          cwd: childCwd,
           inheritedTools: actualTools,
           context: record.context,
           state: record.state,
