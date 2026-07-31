@@ -54,7 +54,7 @@ Parameters:
 | `prompt`      |                                                 | Task for a new or resumed session                                                                                                                            |
 | `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status                                                                                                                                  |
 | `sessionId`   | New ID                                          | Resume, inspect, steer, or stop a child                                                                                                                      |
-| `message`     |                                                 | Guidance queued after the child's current turn (steer only)                                                                                                   |
+| `message`     |                                                 | Guidance queued after the child's current turn (steer only)                                                                                                  |
 | `completion`  | `"continue"`                                    | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                                          |
 | `model`       | Parent, scoped, or saved model                  | Model ID or provider/model specifier; if omitted on new subagents, selects from Pi's active `scopedModels` list; on resume, restores the child's saved model |
 | `thinking`    | Parent or saved level                           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                                                 |
@@ -142,13 +142,13 @@ Use `/bg` to inspect or stop active jobs:
 
 Shell jobs spawned by `bg` inherit the current environment plus the session identity, with any stale launcher values replaced:
 
-| Variable             | Value                                        |
-| -------------------- | -------------------------------------------- |
-| `PI_SESSION_ID`      | Current session ID                           |
-| `PI_SESSION_FILE`    | Current session file (when available)        |
-| `PI_PROVIDER`        | Current provider (`provider/model` split)    |
-| `PI_MODEL`           | Current model ID                             |
-| `PI_REASONING_LEVEL` | Current thinking level                       |
+| Variable             | Value                                     |
+| -------------------- | ----------------------------------------- |
+| `PI_SESSION_ID`      | Current session ID                        |
+| `PI_SESSION_FILE`    | Current session file (when available)     |
+| `PI_PROVIDER`        | Current provider (`provider/model` split) |
+| `PI_MODEL`           | Current model ID                          |
+| `PI_REASONING_LEVEL` | Current thinking level                    |
 
 ## Storage
 

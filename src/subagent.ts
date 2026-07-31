@@ -46,7 +46,7 @@ import {
   sanitizeForkMessages,
   saveRecord,
 } from "./utils.js";
-import { createWorktree, removeWorktree } from "./worktree.js";
+import { createWorktree, getGitCommonDir, removeWorktree } from "./worktree.js";
 
 export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
@@ -218,8 +218,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         what: string,
       ) => {
         const matches = items.filter(
-          (item) =>
-            item.sessionId === id || item.sessionId?.startsWith(id),
+          (item) => item.sessionId === id || item.sessionId?.startsWith(id),
         );
         if (matches.length > 1)
           throw new Error(
@@ -309,7 +308,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
             if (matched) {
               resolvedModel = matched.model;
-              resolvedThinking = matched.thinkingLevel as ThinkingLevel | undefined;
+              resolvedThinking = matched.thinkingLevel as
+                ThinkingLevel | undefined;
             } else {
               const availableNames = scopedList
                 .map((s) => `${s.model.provider}/${s.model.id}`)
@@ -327,7 +327,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             if (resolved.error) throw new Error(resolved.error);
             if (resolved.warning) console.warn(resolved.warning);
             resolvedModel = resolved.model;
-            resolvedThinking = resolved.thinkingLevel as ThinkingLevel | undefined;
+            resolvedThinking = resolved.thinkingLevel as
+              ThinkingLevel | undefined;
           }
         }
         const parentTools = pi
@@ -617,6 +618,15 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           if (!cwdReal.startsWith(worktreesReal + sep)) {
             throw new Error(
               `Cannot resume subagent ${requestedId}: worktree cwd is outside ${SUBAGENT_WORKTREES}: ${existing.cwd}`,
+            );
+          }
+          const [parentGitDir, worktreeGitDir] = await Promise.all([
+            getGitCommonDir(pi, ctx.cwd, setupSignal),
+            getGitCommonDir(pi, existing.cwd, setupSignal),
+          ]);
+          if (!parentGitDir || parentGitDir !== worktreeGitDir) {
+            throw new Error(
+              `Cannot resume subagent ${requestedId}: worktree belongs to a different Git repository`,
             );
           }
         } else if (resolveSubagentCwd(ctx.cwd, existing.cwd) !== existing.cwd) {
@@ -952,13 +962,13 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               ? ""
               : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
           const heading = timedOut
-          ? "Background subagent timed out"
-          : stopped
-            ? "Background subagent was stopped"
-            : reason || failed
-              ? "Background subagent failed"
-              : "Background subagent finished";
-        const header = `${heading}: ${label}`;
+            ? "Background subagent timed out"
+            : stopped
+              ? "Background subagent was stopped"
+              : reason || failed
+                ? "Background subagent failed"
+                : "Background subagent finished";
+          const header = `${heading}: ${label}`;
           const mainContent = truncated.content
             ? `\n\n${truncated.content}`
             : "";
@@ -1045,8 +1055,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         );
 
       const label = args.description || args.prompt || "...";
-      const shortLabel =
-        label.length > 30 ? `${label.slice(0, 30)}...` : label;
+      const shortLabel = label.length > 30 ? `${label.slice(0, 30)}...` : label;
       const modelTag = args.model
         ? ` [${args.model}${args.thinking ? `:${args.thinking}` : ""}]`
         : "";

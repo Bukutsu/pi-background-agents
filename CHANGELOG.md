@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5
+
+- Security: worktree resumes now require the saved worktree and current project to share the same Git repository.
+- Security: `bg` output strips ANSI/OSC terminal controls and unsafe control characters before storage and rendering.
+- Fix: failed worktree creation no longer attempts to delete a potentially pre-existing generated-name branch.
+- Release: regenerated `bun.lock` with the declared local Prettier dependency.
+
 ## 0.4.4
 
 - Security: untrusted children now filter project and ancestor `AGENTS.md`/`CLAUDE.md` files while preserving the user's global context file.

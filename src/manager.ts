@@ -207,7 +207,8 @@ export class JobManager {
             const innerWidth = Math.max(10, width - 2);
             const hasBg = activeJobs.some((j) => j.kind === "shell");
             const hasSub = activeJobs.some((j) => j.kind === "subagent");
-            const kind = hasBg && hasSub ? "bg+sub" : hasSub ? "subagent" : "bg";
+            const kind =
+              hasBg && hasSub ? "bg+sub" : hasSub ? "subagent" : "bg";
             const title = ` ${kind === "bg" ? "Background Jobs" : kind === "subagent" ? "Subagents" : "Jobs"} (${count}) `;
             const rightHint = hasBg ? " /bg " : "";
             const topFillLen = Math.max(
@@ -228,7 +229,10 @@ export class JobManager {
 
             const jobLines = visibleJobs.map((job) => {
               const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-              const icon = job.kind === "shell" ? theme.fg("accent", "⚡") : theme.fg("success", "●");
+              const icon =
+                job.kind === "shell"
+                  ? theme.fg("accent", "⚡")
+                  : theme.fg("success", "●");
               const progress = job.activity
                 ? `, ${truncateToWidth(job.activity, 24)}`
                 : "";

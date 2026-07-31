@@ -17,6 +17,19 @@ import type { BgJob } from "./types.js";
 import { getLogDir } from "./types.js";
 import { renderToolResult } from "./utils.js";
 
+function sanitizeTerminalOutput(value: string) {
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[ -/]*[@-~]/g, "")
+    .replace(/\u009d[^\u0007]*(?:\u0007|\u009c)/g, "")
+    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, "")
+    .replace(
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0090-\u009f]/g,
+      "",
+    );
+}
+
 export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   const MAX_CMD_LEN = 120;
   function runBgProcess(
@@ -78,7 +91,8 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           timeout: timeoutSec,
           env,
           onData(data) {
-            const truncated = truncateTail(output + data.toString());
+            const chunk = sanitizeTerminalOutput(data.toString());
+            const truncated = truncateTail(output + chunk);
             outputTruncated ||= truncated.truncated;
             output = truncated.content;
           },

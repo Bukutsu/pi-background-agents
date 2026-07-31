@@ -1,12 +1,30 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_WORKTREES } from "./types.js";
 import { ensurePrivateDir } from "./utils.js";
+
+export async function getGitCommonDir(
+  pi: ExtensionAPI,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const result = await pi.exec("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      signal,
+    });
+    return result.code === 0
+      ? realpathSync(resolve(cwd, result.stdout.trim()))
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function removeWorktree(
   pi: ExtensionAPI,
@@ -76,7 +94,9 @@ export async function createWorktree(
         `Could not create worktree: ${result.stderr.trim() || result.stdout.trim()}`,
       );
   } catch (error) {
-    await removeWorktree(pi, root, path, branch);
+    // The add may have failed before creating this branch. Do not pass the
+    // generated name to cleanup: it could already belong to someone else.
+    await removeWorktree(pi, root, path);
     throw error;
   }
   let resolvedPath = path;
