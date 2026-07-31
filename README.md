@@ -2,7 +2,7 @@
 
 Background shell jobs and SDK-native subagents for [Pi](https://pi.dev).
 
-`pi-background-agents` keeps the API small: one tool for shell commands and one for child Pi sessions. Subagents run in process and keep their own context and session history.
+`pi-background-agents` provides two tools: `bg` for non-blocking shell commands and `subagent` for running child Pi sessions in process with their own context and history.
 
 ## Install
 
@@ -12,7 +12,7 @@ pi install git:github.com/Bukutsu/pi-background-agents
 
 ## `bg`
 
-Use `bg` for commands that should not block the conversation, such as test suites, builds, installs, and development servers.
+Use `bg` for long-running commands like test suites, builds, package installs, and local dev servers.
 
 ```json
 { "command": "npm run build", "timeoutSec": 300 }
@@ -28,13 +28,13 @@ Parameters:
 | `command`    |              | Shell command for `spawn`                                           |
 | `completion` | `"continue"` | `continue` wakes Pi when done; `queue` waits for the next user turn |
 | `pid`        |              | Job ID for `stop`                                                   |
-| `timeoutSec` | `600`        | Timeout from 1 to 2,147,483 seconds                                 |
+| `timeoutSec` | `600`        | Timeout in seconds (1 to 2,147,483)                                 |
 
-Output is limited to Pi's standard 50 KB or 2,000 lines. Failed and truncated jobs keep a private log in a process-owned temporary directory.
+Output is limited to 50 KB or 2,000 lines. Truncated or failed jobs save their full output to a private log file in a temporary directory.
 
 ## `subagent`
 
-Use `subagent` for work that benefits from a separate context, model, or working directory.
+Use `subagent` to run tasks in a separate context, model, or working directory.
 
 ```json
 {
@@ -44,29 +44,29 @@ Use `subagent` for work that benefits from a separate context, model, or working
 }
 ```
 
-A `spawn` call returns immediately. Pi receives the child's final response when it finishes. `completion: "queue"` uses Pi's in-memory next-turn queue, so exit or reload before the next message discards that queued delivery; the child session and status record remain durable.
+Spawning a subagent returns immediately while the child runs in the background. When `completion` is `"queue"`, the result stays in Pi's in-memory next-turn queue. Exiting or reloading before your next message drops that queued notification, but the subagent session and its status record remain saved.
 
 Parameters:
 
-| Name          | Default                                         | Purpose                                                                                                                               |
-| ------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `action`      | `"spawn"`                                       | `spawn`, `status`, `steer`, or `stop`                                                                                                 |
-| `prompt`      |                                                 | Task for a new or resumed session                                                                                                     |
-| `description` | Prompt itself (truncated to 30 chars if longer) | Short label shown in status                                                                                                           |
-| `sessionId`   | New ID                                          | Resume, inspect, steer, or stop a child                                                                                               |
-| `message`     |                                                 | Guidance queued after the child's current turn (steer only)                                                                           |
-| `completion`  | `"continue"`                                    | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                   |
-| `model`       | Parent, scoped, or saved model                  | Override from the active `scopedModels` scope; without a scope, the parent model is used; on resume, restores the child's saved model |
-| `thinking`    | Parent or saved level                           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                          |
-| `tools`       | Parent tools                                    | Comma-separated allowlist that can only reduce access                                                                                 |
-| `cwd`         | Parent directory                                | Existing directory inside the parent project                                                                                          |
-| `worktree`    | `false`                                         | Create a branch and worktree for a new child                                                                                          |
-| `context`     | `"project"`                                     | `project` starts fresh; `fork` copies the current parent context                                                                      |
-| `timeoutSec`  | `600`                                           | Child timeout                                                                                                                         |
+| Name          | Default                     | Purpose                                                                                                                            |
+| ------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `action`      | `"spawn"`                   | `spawn`, `status`, `steer`, or `stop`                                                                                              |
+| `prompt`      |                             | Task prompt for a new or resumed session                                                                                           |
+| `description` | Truncated prompt (30 chars) | Short label shown in status                                                                                                        |
+| `sessionId`   | New ID                      | Target session ID for resume, status, steer, or stop                                                                               |
+| `message`     |                             | Guidance queued after the child's active turn (steer only)                                                                         |
+| `completion`  | `"continue"`                | `continue` wakes Pi when done; `queue` waits for the next user turn                                                                |
+| `model`       | Parent model                | Model override validated against `scopedModels`; falls back to parent model if no scope is active; on resume, restores saved model |
+| `thinking`    | Parent thinking level       | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`                                                                       |
+| `tools`       | Parent active tools         | Comma-separated tool list (can only reduce access)                                                                                 |
+| `cwd`         | Parent directory            | Directory path inside the parent project                                                                                           |
+| `worktree`    | `false`                     | Create a Git branch and worktree for parallel edits                                                                                |
+| `context`     | `"project"`                 | `project` starts a fresh context; `fork` copies the parent's context                                                               |
+| `timeoutSec`  | `600`                       | Timeout in seconds                                                                                                                 |
 
 ### Parallel edits
 
-Set `worktree: true` when subagents will edit in parallel:
+Set `worktree: true` when subagents edit code in parallel:
 
 ```json
 {
@@ -76,19 +76,19 @@ Set `worktree: true` when subagents will edit in parallel:
 }
 ```
 
-`pi-background-agents` creates a branch from the current `HEAD` and a worktree under `<agent-dir>/pi-bg/worktrees`. Git checkout hooks are disabled during creation. It returns both paths and leaves them in place.
+`pi-background-agents` creates a Git branch from `HEAD` and an isolated worktree in `<agent-dir>/pi-bg/worktrees`. It skips Git checkout hooks during creation, returns the branch and directory paths, and leaves them on disk for you to review, merge, or delete.
 
-`cwd` and `worktree: true` cannot be used together.
+Do not combine `cwd` and `worktree: true` in the same call.
 
 ### Context
 
-`context: "project"` starts a fresh conversation with normal Pi resource discovery in the child directory. The prompt must contain the task and any decisions the child needs.
+Setting `context: "project"` starts a fresh session with standard resource discovery in the target directory. Put all necessary instructions and decisions directly in the prompt.
 
-`context: "fork"` copies the parent's effective conversation into a new child session. It removes package completion messages and orchestration tool calls. The copy is a flattened context snapshot, not a duplicate of the parent's session tree.
+Setting `context: "fork"` copies the parent's current conversation into the child session, removing orchestration tool calls and package completion messages. The child gets a flat snapshot of the conversation rather than a branch of the parent's session tree.
 
 ### Resume
 
-Subagent sessions live under `<agent-dir>/pi-bg` and survive Pi restarts. Resume one with its session ID:
+Subagent sessions are saved under `<agent-dir>/pi-bg` and persist across Pi restarts. Pass a session ID to resume:
 
 ```json
 {
@@ -97,15 +97,17 @@ Subagent sessions live under `<agent-dir>/pi-bg` and survive Pi restarts. Resume
 }
 ```
 
-A resumed child returns to its saved directory and restores its model and thinking level unless the call overrides them. Resume fails if its session file or working directory has been removed.
+Resuming reopens the child's directory and restores its saved model and thinking level. Resuming fails if the session file or directory no longer exists.
 
-### Model selection & scoped models
+### Model selection and scopedModels
 
-When spawning a new subagent without an explicit `model` parameter:
+`pi-background-agents` respects Pi's active `scopedModels` configuration:
 
-- `subagent` evaluates Pi's active `scopedModels` list when the host exposes one.
-- Explicit model overrides are accepted only within that active scope; without a scope, the child uses the parent's current model.
-- If you change your scoped models or switch active models mid-session, subsequent subagent spawns use the current configuration.
+- When `scopedModels` is active in Pi (version 0.83 or later), explicit `model` requests are checked against the allowed scope. If the requested model is in scope, the subagent uses it. If it is not in scope, the spawn call fails with an error listing available models.
+- If no `scopedModels` list is active on the host, requested `model` parameters are ignored with a warning, and the child uses the parent session's model. This prevents subagents from making unauthorized calls to unconfigured providers.
+- When no `model` parameter is provided on a new spawn, the child inherits the parent's current model or the matching scoped model entry.
+- Resuming a subagent (`sessionId`) restores the child's saved model unless you specify a new model within the active scope.
+- Explicit `thinking` level settings are always respected.
 
 ### Status and control
 
@@ -116,21 +118,23 @@ When spawning a new subagent without an explicit `model` parameter:
 { "action": "stop", "sessionId": "<session-id>" }
 ```
 
-Status includes active sessions and up to 5 recently updated non-active sessions (or a specific session when `sessionId` is provided). The rendered report shows model, thinking, current activity, turns, tool calls and failures, duration, and cost; the machine-readable result adds directory, token usage, and session file.
+Running `status` returns active subagents and up to 5 recently updated non-active sessions. The rendered table displays model, thinking level, status, activity, turn count, tool calls and failures, duration, and cost. The machine-readable output includes directory path, token counts, and session file path.
 
-Steering does not interrupt the current turn. The message is delivered after that turn finishes.
+Steering queues a message for the child to process after its current turn completes.
 
 ## Tool inheritance
 
-Children request the parent's active tool names, then load tools through normal discovery in the child directory. Built-in and rediscoverable extension tools carry over. Temporary, inline, or parent-only extension tools may not exist in the child. Spawn and status report the child's actual tool set. An explicit `tools` list can narrow access and fails if a requested tool is unavailable. `bg` and `subagent` are always removed to prevent recursive delegation.
+Children inherit the parent's active tools and discover tools in their own working directory. Built-in tools and extension tools carry over if present in the child directory. `bg` and `subagent` are stripped from children to prevent recursive delegation.
 
-Child extensions use Pi's print-mode lifecycle. Parent reloads and session changes stop owned jobs and suppress stale completion messages.
+Passing a `tools` parameter restricts the child to the specified subset of active parent tools.
 
-## UI
+Child extensions follow Pi's print-mode lifecycle. Reloading the parent extension or switching sessions stops running jobs and discards stale completion messages.
 
-Running work appears above the editor. Subagent rows include a compact model and thinking label such as `<model>:<thinking>` plus the current activity.
+## User interface
 
-Use `/bg` to inspect or stop active jobs:
+Active background work renders in a widget above the editor. Subagent rows display `<model>:<thinking>` and current activity.
+
+Run `/bg` to list or stop active background tasks:
 
 ```text
 /bg
@@ -139,44 +143,42 @@ Use `/bg` to inspect or stop active jobs:
 
 ## Environment variables
 
-Shell jobs spawned by `bg` inherit the current environment plus the session identity, with any stale launcher values replaced:
+Commands run through `bg` receive the parent environment plus session identity variables, with launcher variables refreshed:
 
-| Variable             | Value                                     |
-| -------------------- | ----------------------------------------- |
-| `PI_SESSION_ID`      | Current session ID                        |
-| `PI_SESSION_FILE`    | Current session file (when available)     |
-| `PI_PROVIDER`        | Current provider (`provider/model` split) |
-| `PI_MODEL`           | Current model ID                          |
-| `PI_REASONING_LEVEL` | Current thinking level                    |
+| Variable             | Value                     |
+| -------------------- | ------------------------- |
+| `PI_SESSION_ID`      | Current session ID        |
+| `PI_SESSION_FILE`    | Current session file path |
+| `PI_PROVIDER`        | Current model provider    |
+| `PI_MODEL`           | Current model ID          |
+| `PI_REASONING_LEVEL` | Current thinking level    |
 
 ## Storage
 
-| Data                                      | Location                               |
-| ----------------------------------------- | -------------------------------------- |
-| Durable subagent sessions and index       | `<agent-dir>/pi-bg`                    |
-| Generated worktrees                       | `<agent-dir>/pi-bg/worktrees`          |
-| Temporary shell and truncated-output logs | Process-owned directory under `<temp>` |
+| Data                               | Location                      |
+| ---------------------------------- | ----------------------------- |
+| Subagent session records and index | `<agent-dir>/pi-bg`           |
+| Worktrees                          | `<agent-dir>/pi-bg/worktrees` |
+| Temporary output logs              | Temp directory                |
 
-Generated worktrees are not merged or removed automatically. Temporary logs may be cleared by the operating system. Child usage is reported by subagent status and completion messages, but it cannot be added retroactively to the already-finished parent tool call's usage total.
+Worktrees are not deleted or merged automatically. Temporary logs clean up according to OS policies. Child token usage appears in subagent status and completion reports, but does not alter the parent's already-finished tool call totals.
 
 ## Design constraints
 
-The implementation is intentionally small, but several pieces are required for correctness:
+The package stays focused on background execution. The following choices ensure reliability:
 
-- Keep the durable session index. Session files alone cannot reliably find a resumed child that used another directory or worktree.
-- Keep per-run `getSessionStats()` snapshots. Reading only the final assistant message misses earlier turns, retries, compaction, and tool-owned usage.
-- Keep both the parent generation and shutdown guards. The abort controller is replaced when a new session starts, so it cannot identify callbacks owned by the previous session. The generation blocks those callbacks, while the shutdown flag covers the gap before replacement.
-- Keep child extension binding and shutdown paired. Loading extension tools without their lifecycle hooks leaves child resources partially initialized.
-- Keep the live widget and activity subscription. They make background work visible and cancellable without polling. Tracking active tool IDs also handles parallel child tools and supplies failure counts for status.
-- Keep `steer`. It is the direct control path for a running SDK session and queues guidance without discarding the current turn.
-- Keep both completion modes. `continue` wakes the parent for autonomous work; `queue` avoids an unsolicited model turn and its cost when the result can wait.
-- Keep fork sanitization structural. Model history must retain matched tool calls and results while dropping orchestration calls, unresolved calls, and package completion messages. Copying only prose changes the parent context and can lose decisions recorded in tool results.
-- Keep partial assistant output. Aborts and provider errors can end a run after useful text has streamed but before a final assistant message is stored.
-- Keep stale-run reconciliation. The owner PID distinguishes a live child from a durable record left in `running` state after a crash.
-- Keep generated worktrees persistent. Automatic cleanup could delete unmerged changes. The caller owns merging and removal.
-- Keep `bg` and `subagent` unavailable to children. Unbounded recursive delegation makes cancellation and ownership unclear.
-
-Features outside these constraints should earn their place. The package does not need agent roles, workflow syntax, scheduling, RPC, a transcript viewer, or automatic merging and cleanup.
+- Store a durable session index. Session files alone cannot reliably track resumed subagents across different working directories or worktrees.
+- Take `getSessionStats()` snapshots before and after runs. Reading only final messages misses intermediate turns, tool calls, and compaction usage.
+- Guard session changes with generation numbers and shutdown flags. Abort controllers reset on new sessions; generation tracking prevents old callbacks from running into new sessions.
+- Pair extension loading with shutdown handlers. Loading extension tools without lifecycle hooks leaves resources unmanaged.
+- Update UI status and activity in real time. Live widgets make running tasks visible and steerable without polling.
+- Support `steer`. Steering allows guiding a running subagent without canceling its active turn.
+- Offer both `continue` and `queue` completion modes. `continue` wakes the parent for autonomous tasks; `queue` waits for user input to avoid unwanted API costs.
+- Sanitize fork context structurally. History must retain tool calls and results while removing orchestration calls and completion messages.
+- Preserve partial output. When a run aborts or encounters an error, text produced before the failure remains available.
+- Reconcile stale runs via process IDs. PID checks distinguish active children from leftover `running` records after a crash.
+- Leave worktrees on disk. Automatic cleanup risks deleting uncommitted edits.
+- Block `bg` and `subagent` inside children. Disabling nested delegation keeps task ownership clear and prevents infinite loops.
 
 ## Contributing
 

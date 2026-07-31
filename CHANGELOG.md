@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.9
+
+- Docs: humanized documentation prose and clarified `scopedModels` handling when requesting subagent model overrides.
+
 ## 0.4.8
 
 - Security: subagent model overrides are restricted to active `scopedModels`; when no active model scope exists, requested models fall back to the parent model instead of arbitrary provider resolution.
