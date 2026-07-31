@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.7
+
+- Security: sanitize replayed `pi-bg-result` messages at the custom renderer boundary.
+- Fix: a post-setup guard failure now force-disposes the prepared child before releasing its lock and worktree.
+
 ## 0.4.6
 
 - Security: untrusted child extensions can no longer inject skills, prompts, or themes after resource discovery.

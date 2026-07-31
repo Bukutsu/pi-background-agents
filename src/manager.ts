@@ -67,7 +67,9 @@ export class JobManager {
     this.pi.registerMessageRenderer(
       "pi-bg-result",
       (message, options, theme) => {
-        const text = extractTextContent(message.content);
+        const text = sanitizeTerminalOutput(
+          extractTextContent(message.content),
+        );
         if (!text.trim()) return undefined;
 
         const lines = text.trim().split("\n");

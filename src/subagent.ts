@@ -773,7 +773,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           removeFreshSessionFile();
           throw lockError;
         }
-        let prepared: Awaited<ReturnType<typeof setupChildSession>>;
+        let prepared: Awaited<ReturnType<typeof setupChildSession>> | undefined;
         try {
           prepared = await setupChildSession({
             cwd: childCwd,
@@ -788,12 +788,16 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           });
           checkSetup();
         } catch (error) {
+          // A post-setup guard can fail after the child has been returned.
+          prepared?.forceDispose();
           // setupChildSession disposes anything it created; free the lock and
           // any fresh session file here
           removeLock();
           removeFreshSessionFile();
           throw error;
         }
+        if (!prepared)
+          throw new Error("Child session setup returned no session");
         session = prepared.session;
         modelFallbackMessage = prepared.modelFallbackMessage;
         actualTools = prepared.actualTools;
