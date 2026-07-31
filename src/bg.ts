@@ -159,7 +159,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     handler: async (args, ctx) => {
       manager.currentCtx = ctx;
       const trimmed = args?.trim() ?? "";
-      const killMatch = trimmed.match(/^(?:kill\s+)?(\d+)$/);
+      const killMatch = trimmed.match(/^kill\s+(\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);
         if (manager.killJob(pid)) {
@@ -172,6 +172,10 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       }
       if (trimmed.startsWith("kill")) {
         ctx.ui.notify("Usage: /bg kill <pid>", "error");
+        return;
+      }
+      if (trimmed) {
+        ctx.ui.notify(`Unknown /bg command: ${trimmed}`, "error");
         return;
       }
 

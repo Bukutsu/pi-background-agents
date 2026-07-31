@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_WORKTREES } from "./types.js";
+import { ensurePrivateDir } from "./utils.js";
 
 export async function removeWorktree(
   pi: ExtensionAPI,
@@ -62,8 +63,7 @@ export async function createWorktree(
   const root = realpathSync(rootResult.stdout.trim());
   const id = randomUUID().slice(0, 8);
   const branch = `pi-background-agents/${Date.now()}-${id}`;
-  mkdirSync(SUBAGENT_WORKTREES, { recursive: true, mode: 0o700 });
-  chmodSync(SUBAGENT_WORKTREES, 0o700); // tighten pre-existing dirs
+  ensurePrivateDir(SUBAGENT_WORKTREES);
   const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
   try {
     const result = await pi.exec(

@@ -15,12 +15,11 @@ import { join, relative, resolve } from "node:path";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
-  ExtensionAPI,
   ExtensionContext,
   SessionStats,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Model, Provider } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import {
   SUBAGENT_INDEX,
@@ -310,55 +309,6 @@ export function getScopedModels(ctx: ExtensionContext) {
         }
       ).scopedModels
     : undefined;
-}
-
-// ponytail: let the user plug in model providers from installed npm packages
-// (e.g. "antigravity") that the host itself doesn't have configured. Sourced
-// from the PI_BG_PROVIDERS env var only (never a project-local config file).
-export async function loadCustomProviders(pi: ExtensionAPI) {
-  // Only the explicit env var, never a project-local config file: this runs
-  // during global extension init, before Pi has trusted any project, and a
-  // config file in an untrusted checkout must not trigger package imports.
-  const specifiers = new Set<string>();
-  const env = process.env.PI_BG_PROVIDERS?.split(/[,\s]+/).filter(Boolean);
-  if (env) for (const spec of env) specifiers.add(spec);
-  const VALID_SPECIFIER = /^[a-z0-9@][a-z0-9@/_.-]*$/i;
-  for (const spec of specifiers) {
-    if (!VALID_SPECIFIER.test(spec) || spec.includes("..")) {
-      console.warn(
-        `Ignoring invalid custom provider package specifier "${spec}"`,
-      );
-      continue;
-    }
-    try {
-      const mod = await import(spec);
-      const candidates = Array.isArray(mod)
-        ? mod
-        : [
-            mod.default ??
-              Object.values(mod).find(
-                (v: any) =>
-                  v &&
-                  typeof v === "object" &&
-                  ("stream" in v || "complete" in v),
-              ) ??
-              mod,
-          ];
-      for (const candidate of candidates) {
-        if (!candidate || typeof candidate !== "object") continue;
-        if (
-          typeof candidate.id === "string" &&
-          (candidate.stream || candidate.complete)
-        ) {
-          pi.registerProvider(candidate as Provider);
-        } else {
-          pi.registerProvider(candidate.name ?? spec, candidate);
-        }
-      }
-    } catch (error) {
-      console.warn(`Could not load custom provider package "${spec}":`, error);
-    }
-  }
 }
 
 export function resolveSubagentCwd(parent: string, requested?: string) {

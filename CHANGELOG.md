@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- Removed the foreground `chain` workflow (the last blocking path in a package built for backgrounding; the parent model can pass a prior subagent's output into the next spawn's prompt).
+- Removed the `PI_BG_PROVIDERS` dynamic provider loader (ran package imports during global extension init; the host's provider registry is already forwarded to children).
+- Surface cleanup: `/bg` rejects undocumented forms (bare pid, unknown args) instead of silently acting or no-op'ing; status icon map inlined; status lookup no longer scans the durable index twice; `message` documented as steer-only.
+- npm `files` whitelist trimmed (README and LICENSE are always included).
+
 ## 0.4.1
 
 - Security: children only load project resources when the parent already trusted the checkout (`projectTrusted` propagated from `ctx.isProjectTrusted()`); previously every child defaulted to trusted and would execute an untrusted repo's `.pi/extensions`.

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   realpathSync,
@@ -38,6 +37,7 @@ import {
 } from "./types.js";
 import {
   acquireSessionLock,
+  ensurePrivateDir,
   extractTextContent,
   getScopedModels,
   getSubagentHeading,
@@ -46,7 +46,6 @@ import {
   resolveSubagentCwd,
   sanitizeForkMessages,
   saveRecord,
-  STATE_ICONS,
 } from "./utils.js";
 import { createWorktree, removeWorktree } from "./worktree.js";
 
@@ -71,7 +70,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
     if (sessions.length === 0) return "No matching subagent sessions.";
 
     const cards = sessions.map((s) => {
-      const icon = STATE_ICONS[s.state] ?? "•";
+      const icon =
+        s.state === "running" ? "●" : s.state === "finished" ? "✓" : "✖";
       const duration =
         s.elapsedSec !== undefined
           ? `${s.elapsedSec}s`
@@ -108,9 +108,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       "Reuse sessionId from an earlier subagent result to continue its saved model, thinking level, cwd, and conversation.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
       "For independent tasks that don't depend on each other, spawn multiple subagents in one turn; each runs in the background and its result arrives as it finishes.",
-      "For sequential subagent workflows (scout \u2192 plan \u2192 implement), use chain:[{prompt},{prompt}] and use {previous} in later prompts to reference prior output.",
+      "For sequential work that builds on prior results, spawn one subagent, then spawn the next with the previous result in its prompt.",
       "Use worktree:true for concurrent writing subagents; pi-background-agents creates but never merges or removes the branch/worktree.",
-      "After starting a subagent, continue work immediately; never wait, sleep, or poll action:status for completion. Results arrive automatically. chain runs in the foreground and returns when all steps finish.",
+      "After starting a subagent, continue work immediately; never wait, sleep, or poll action:status for completion. Results arrive automatically.",
     ],
     parameters: Type.Object({
       action: Type.Optional(
@@ -130,7 +130,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       ),
       message: Type.Optional(
         Type.String({
-          description: "Message queued after the running child's current turn",
+          description:
+            "Message queued after the running child's current turn (steer only)",
         }),
       ),
       completion: Type.Optional(
@@ -185,26 +186,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           description: "Timeout in seconds (default: 600)",
         }),
       ),
-      chain: Type.Optional(
-        Type.Array(
-          Type.Object({
-            prompt: Type.String({ description: "Task for this subagent; use {previous} for prior output" }),
-            description: Type.Optional(Type.String({ description: "Short label" })),
-            model: Type.Optional(Type.String({ description: "Model override" })),
-            thinking: Type.Optional(
-              StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
-                description: "Thinking level",
-              }),
-            ),
-            tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
-            cwd: Type.Optional(Type.String({ description: "Working directory" })),
-            timeoutSec: Type.Optional(
-              Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds" }),
-            ),
-          }),
-          { description: "Run subagents sequentially with {previous} substitution", maxItems: 8 },
-        ),
-      ),
     }),
     async execute(
       _id,
@@ -222,7 +203,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         worktree = false,
         context = "project",
         timeoutSec = 600,
-        chain,
       },
       signal,
       _up,
@@ -259,18 +239,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         ? findActiveSubagent(requestedId)
         : undefined;
 
-      // ── runSubagentSession: shared helper for chain steps ──
-      type ChainItem = {
-        prompt: string;
-        description?: string;
-        model?: string;
-        thinking?: string;
-        tools?: string;
-        cwd?: string;
-        timeoutSec?: number;
-        [key: string]: unknown;
-      };
-      // ── setupChildSession: shared child-session setup for spawn and chain ──
+      // ── setupChildSession: child-session setup for spawn ──
       // Model resolution, tool allowlist, session creation, and extension
       // binding. Divergent orchestration (locks, worktrees, fork/resume,
       // durable records) stays in the callers.
@@ -372,8 +341,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
           );
         const childTools = requestedTools ?? parentTools;
-        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
-        chmodSync(SUBAGENT_SESSION_DIR, 0o700); // tighten pre-existing dirs
+        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true });
+        ensurePrivateDir(SUBAGENT_SESSION_DIR);
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
@@ -483,123 +452,20 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         };
       };
 
-      const runSubagentSession = async (
-        item: ChainItem,
-        itemSignal?: AbortSignal,
-      ): Promise<{
-        text: string;
-        sessionId: string;
-        model: string;
-        thinking: string | undefined;
-        turns: number;
-        toolCount: number;
-        cost: number;
-        durationSec: number;
-        error?: string;
-      }> => {
-        const startMs = Date.now();
-        const itemCwd = resolveSubagentCwd(ctx.cwd, item.cwd);
-        // Chain steps are foreground and transient: in-memory sessions, no
-        // durable files that cannot be resumed.
-        const sessionManager = SessionManager.inMemory(itemCwd);
-        const { session, dispose } = await setupChildSession({
-          cwd: itemCwd,
-          model: item.model,
-          thinking: item.thinking as ThinkingLevel | undefined,
-          tools: item.tools,
-          sessionManager,
-        });
-        try {
-          const timeoutMs = (item.timeoutSec ?? 600) * 1000;
-          const ac = new AbortController();
-          const abortSession = () => void session.abort();
-          ac.signal.addEventListener("abort", abortSession, { once: true });
-          const timer = setTimeout(() => ac.abort(), timeoutMs);
-          let thrown: string | undefined;
-          let lastMsg: AssistantMessage | undefined;
-          const unsub = session.subscribe((ev) => {
-            if (
-              (ev.type === "message_update" || ev.type === "message_end") &&
-              ev.message.role === "assistant"
-            )
-              lastMsg = ev.message;
-          });
-          try {
-            if (itemSignal?.aborted) ac.abort();
-            if (!ac.signal.aborted) await session.prompt(item.prompt);
-          } catch (e) {
-            thrown = e instanceof Error ? e.message : String(e);
-          } finally {
-            clearTimeout(timer);
-            unsub();
-            ac.signal.removeEventListener("abort", abortSession);
-          }
-          const assistant = lastMsg;
-          const text = extractTextContent(assistant?.content).trim();
-          const turns = assistant?.usage ? 1 : 0;
-          const cost = assistant?.usage?.cost?.total ?? 0;
-          const toolCount = (assistant?.content?.filter((c: any) => c.type === "toolUse" || c.type === "toolCall") ?? []).length;
-          return {
-            text: thrown ? `Error: ${thrown}` : (text || "(no output)"),
-            sessionId: session.sessionId,
-            model: `${session.model!.provider}/${session.model!.id}`,
-            thinking: session.thinkingLevel,
-            turns,
-            toolCount,
-            cost,
-            durationSec: Math.round((Date.now() - startMs) / 1000),
-            error: thrown,
-          };
-        } finally {
-          await dispose();
-        }
-      };
-
-      // ── Chain: sequential with {previous} substitution ──
-      if (chain && chain.length > 0) {
-        if (action !== "spawn")
-          throw new Error('chain is only valid with action "spawn"');
-        const combine = (results: Awaited<ReturnType<typeof runSubagentSession>>[]) => {
-          const parts = results.map((r, i) => {
-            const tag = `Step ${i + 1}`;
-            const icon = r.error ? "✗" : "✓";
-            const errNote = r.error ? ` (failed)` : "";
-            const head = `${icon} ${tag}: ${r.text.slice(0, 120)}${r.text.length > 120 ? "..." : ""}`;
-            const meta = `  [${r.model}${r.thinking ? `:${r.thinking}` : ""}] ${r.durationSec}s, ${r.turns} turn${r.turns === 1 ? "" : "s"}, ${r.cost ? `$${r.cost.toFixed(4)}` : ""}`;
-            return `${head}\n${meta}${errNote}`;
-          });
-          const failed = results.filter((r) => r.error);
-          const succeeded = results.filter((r) => !r.error);
-          const summary = `\n\n— Chain finished: ${succeeded.length} succeeded, ${failed.length} failed`;
-          return {
-            content: [{ type: "text" as const, text: parts.join("\n\n") + summary }],
-            details: { mode: "chain", results },
-            ...(failed.length > 0 ? { isError: true } : {}),
-          };
-        };
-        let previous = "";
-        const results: Awaited<ReturnType<typeof runSubagentSession>>[] = [];
-        for (const step of chain) {
-          const stepPrompt = step.prompt.replace("{previous}", previous || "(no prior output)");
-          const r = await runSubagentSession({ ...step, prompt: stepPrompt }, signal);
-          results.push(r);
-          previous = r.text;
-          if (r.error) break; // stop on first failure
-        }
-        return combine(results);
-      }
-
       if (action === "status") {
         const active = new Map(
           Array.from(manager.jobs.values())
             .filter((job) => job.kind === "subagent" && job.record)
             .map((job) => [job.sessionId!, job]),
         );
+        const durableRecord = requestedId
+          ? findDurableRecord(requestedId)
+          : undefined;
         const records = requestedId
           ? matching?.record
             ? [matching.record]
-            : findDurableRecord(requestedId)
-              ? [findDurableRecord(requestedId)!]
+            : durableRecord
+              ? [durableRecord]
               : []
           : [
               ...Array.from(active.values(), (job) => job.record!),
@@ -1114,12 +980,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
     },
     renderCall(args, theme, _context) {
       const action = args.action ?? "spawn";
-      if (args.chain?.length)
-        return new Text(
-          theme.fg("toolTitle", theme.bold(`Chain: ${args.chain.length} steps`)),
-          0,
-          0,
-        );
       if (action === "status")
         return new Text(
           theme.fg(
