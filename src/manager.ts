@@ -71,10 +71,15 @@ export class JobManager {
 
         const lines = text.trim().split("\n");
         const firstLine = lines[0] ?? "";
-        const isError =
-          firstLine.toLowerCase().includes("failed") ||
-          firstLine.toLowerCase().includes("timed out") ||
-          firstLine.toLowerCase().includes("stopped");
+        const isError = [
+          "Background task could not start",
+          "Background task failed",
+          "Background task timed out",
+          "Background task was stopped",
+          "Background subagent timed out",
+          "Background subagent was stopped",
+          "Background subagent failed",
+        ].some((prefix) => firstLine.startsWith(prefix));
 
         const bgFn = isError
           ? (s: string) => theme.bg("toolErrorBg", s)
@@ -224,7 +229,9 @@ export class JobManager {
             const jobLines = visibleJobs.map((job) => {
               const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
               const icon = job.kind === "shell" ? theme.fg("accent", "⚡") : theme.fg("success", "●");
-              const progress = job.activity ? `, ${job.activity}` : "";
+              const progress = job.activity
+                ? `, ${truncateToWidth(job.activity, 24)}`
+                : "";
               const badgeText = job.session?.model
                 ? `${job.session.model.id}:${job.session.thinkingLevel}`
                 : job.kind === "subagent" && job.record?.model
@@ -272,7 +279,11 @@ export class JobManager {
             }
 
             const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-            return [top, ...jobLines, bottom];
+            // TUI requires every line to fit `width` (bottom border is the one
+            // line not built against it; truncate defensively).
+            return [top, ...jobLines, bottom].map((line) =>
+              truncateToWidth(line, width),
+            );
           },
           invalidate() {},
         };

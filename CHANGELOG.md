@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4
+
+- Security: untrusted children now filter project and ancestor `AGENTS.md`/`CLAUDE.md` files while preserving the user's global context file.
+- Fix: narrow-terminal widgets truncate every rendered line to the requested width.
+- Fix: background start failures and stopped/timed-out results use error styling without label-text false positives.
+- Fix: steering a completed/non-streaming child now reports an error instead of silently losing guidance.
+- Cleanup: deduplicated session cleanup and session-prefix lookup; removed redundant thinking/setup logic; status now shows tool failures and render labels are capped.
+
 ## 0.4.3
 
 - Security: untrusted children no longer load project `AGENTS.md`/`CLAUDE.md` context files (loader now built with `noContextFiles` when the parent hasn't trusted the checkout).

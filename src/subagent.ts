@@ -38,7 +38,6 @@ import {
 } from "./types.js";
 import {
   acquireSessionLock,
-  ensurePrivateDir,
   extractTextContent,
   getScopedModels,
   readIndex,
@@ -83,7 +82,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       const shortId = s.sessionId.slice(0, 8);
       const activityStr =
         s.activity ??
-        `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`;
+        `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}${s.toolFailures ? `, ${s.toolFailures} failure${s.toolFailures === 1 ? "" : "s"}` : ""}`;
 
       const thinkingStr = s.thinking ? `:${s.thinking}` : "";
       return `${icon} ${s.state}  ${s.label}
@@ -213,28 +212,32 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       manager.currentCtx = ctx;
       const requestedId = sessionId?.trim();
       const durable = readIndex();
-      const findActiveSubagent = (id: string) => {
-        const matches = Array.from(manager.jobs.values()).filter(
-          (job) =>
-            job.kind === "subagent" &&
-            (job.sessionId === id || job.sessionId?.startsWith(id)),
+      const findBySessionPrefix = <T extends { sessionId?: string }>(
+        items: T[],
+        id: string,
+        what: string,
+      ) => {
+        const matches = items.filter(
+          (item) =>
+            item.sessionId === id || item.sessionId?.startsWith(id),
         );
         if (matches.length > 1)
           throw new Error(
-            `Ambiguous subagent session prefix '${id}' matches ${matches.length} running sessions; use the full sessionId`,
+            `Ambiguous subagent session prefix '${id}' matches ${matches.length} ${what}; use the full sessionId`,
           );
         return matches[0];
       };
+      const findActiveSubagent = (id: string) =>
+        findBySessionPrefix(
+          Array.from(manager.jobs.values()).filter(
+            (job) => job.kind === "subagent",
+          ),
+          id,
+          "running sessions",
+        );
       const findDurableRecord = (id: string) => {
         if (durable[id]) return durable[id];
-        const matches = Object.values(durable).filter((r) =>
-          r.sessionId.startsWith(id),
-        );
-        if (matches.length > 1)
-          throw new Error(
-            `Ambiguous subagent session prefix '${id}' matches ${matches.length} sessions; use the full sessionId`,
-          );
-        return matches[0];
+        return findBySessionPrefix(Object.values(durable), id, "sessions");
       };
 
       const matching = requestedId
@@ -306,8 +309,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
             if (matched) {
               resolvedModel = matched.model;
-              resolvedThinking = (opts.thinking ??
-                matched.thinkingLevel) as ThinkingLevel | undefined;
+              resolvedThinking = matched.thinkingLevel as ThinkingLevel | undefined;
             } else {
               const availableNames = scopedList
                 .map((s) => `${s.model.provider}/${s.model.id}`)
@@ -325,8 +327,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             if (resolved.error) throw new Error(resolved.error);
             if (resolved.warning) console.warn(resolved.warning);
             resolvedModel = resolved.model;
-            resolvedThinking = (opts.thinking ??
-              resolved.thinkingLevel) as ThinkingLevel | undefined;
+            resolvedThinking = resolved.thinkingLevel as ThinkingLevel | undefined;
           }
         }
         const parentTools = pi
@@ -343,7 +344,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
           );
         const childTools = requestedTools ?? parentTools;
-        ensurePrivateDir(SUBAGENT_SESSION_DIR);
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
@@ -371,12 +371,17 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         let resourceLoader: DefaultResourceLoader | undefined;
         if (!trusted) {
           // Untrusted children must not inherit project instructions
-          // (AGENTS.md / CLAUDE.md) either.
+          // (AGENTS.md / CLAUDE.md); keep the user's global context file.
+          const agentDir = getAgentDir();
           resourceLoader = new DefaultResourceLoader({
             cwd: opts.cwd,
-            agentDir: getAgentDir(),
+            agentDir,
             settingsManager,
-            noContextFiles: true,
+            agentsFilesOverride: (base) => ({
+              agentsFiles: base.agentsFiles.filter((f) =>
+                f.path.startsWith(agentDir + sep),
+              ),
+            }),
           });
           await resourceLoader.reload();
         }
@@ -522,6 +527,12 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Running subagent not found: ${requestedId || "missing sessionId"}`,
           );
         if (!message?.trim()) throw new Error("message is required for steer");
+        // session.steer() only queues while the agent is streaming; reject
+        // instead of silently losing guidance to a completion race.
+        if (!matching.session.isStreaming)
+          throw new Error(
+            `Subagent ${matching.sessionId} is not currently running`,
+          );
         if (completion !== undefined) matching.completion = completion;
         try {
           await matching.session.steer(message.trim());
@@ -649,6 +660,20 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       try {
         checkSetup();
         let sessionManager!: SessionManager;
+        // Fresh sessions that fail before registration would leave an
+        // unindexed session file; remove it so nothing orphaned accumulates.
+        const removeFreshSessionFile = () => {
+          if (!existing) {
+            try {
+              rmSync(sessionManager?.getSessionFile() ?? "", { force: true });
+            } catch {}
+          }
+        };
+        const removeLock = () => {
+          try {
+            rmSync(sessionLock, { recursive: true, force: true });
+          } catch {}
+        };
         try {
           sessionManager = existing
             ? SessionManager.open(
@@ -667,13 +692,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             for (const parentMessage of sanitizeForkMessages(ctx))
               sessionManager.appendMessage(parentMessage as any);
         } catch (error) {
-          // A fresh session may have written its file before setup failed;
-          // remove it so nothing orphaned accumulates.
-          if (!existing) {
-            try {
-              rmSync(sessionManager?.getSessionFile() ?? "", { force: true });
-            } catch {}
-          }
+          removeFreshSessionFile();
           throw error;
         }
         const targetSessionId =
@@ -681,12 +700,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         try {
           sessionLock = acquireSessionLock(targetSessionId);
         } catch (lockError) {
-          // Clean up orphaned session file if we created one before lock acquisition
-          if (!existing) {
-            try {
-              rmSync(sessionManager.getSessionFile() ?? "", { force: true });
-            } catch {}
-          }
+          removeFreshSessionFile();
           throw lockError;
         }
         let prepared: Awaited<ReturnType<typeof setupChildSession>>;
@@ -704,14 +718,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         } catch (error) {
           // setupChildSession disposes anything it created; free the lock and
           // any fresh session file here
-          try {
-            rmSync(sessionLock, { recursive: true, force: true });
-          } catch {}
-          if (!existing) {
-            try {
-              rmSync(sessionManager.getSessionFile() ?? "", { force: true });
-            } catch {}
-          }
+          removeLock();
+          removeFreshSessionFile();
           throw error;
         }
         session = prepared.session;
@@ -719,22 +727,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         actualTools = prepared.actualTools;
         disposeChild = async () => {
           await prepared.dispose();
-          try {
-            rmSync(sessionLock, { recursive: true, force: true });
-          } catch {}
-        };
-        // Fresh sessions that fail after setup would leave an unindexed
-        // session file; remove it so nothing orphaned accumulates.
-        const cleanupNewSession = async () => {
-          await disposeChild();
-          if (!existing) {
-            try {
-              rmSync(sessionManager.getSessionFile() ?? "", { force: true });
-            } catch {}
-          }
+          removeLock();
         };
         if (!session.model) {
-          await cleanupNewSession();
+          await disposeChild();
+          removeFreshSessionFile();
           throw new Error("Subagent session did not initialize a model");
         }
         try {
@@ -749,13 +746,15 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
           }
         } catch (error) {
-          await cleanupNewSession();
+          await disposeChild();
+          removeFreshSessionFile();
           throw error;
         }
         sessionFile =
           session.sessionFile ?? sessionManager.getSessionFile() ?? "";
         if (!sessionFile) {
-          await cleanupNewSession();
+          await disposeChild();
+          removeFreshSessionFile();
           throw new Error(
             "Subagent session did not initialize a persistent session path",
           );
@@ -773,7 +772,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       let lastAssistantMessage: AssistantMessage | undefined;
       const activeTools = new Map<string, string>();
       if (controller.signal.aborted) {
-        cancelled = !timedOut;
+        cancelled = true; // timeout timer not started yet
         void session.abort().catch(() => {});
       } else {
         controller.signal.addEventListener(
@@ -1046,12 +1045,14 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         );
 
       const label = args.description || args.prompt || "...";
+      const shortLabel =
+        label.length > 30 ? `${label.slice(0, 30)}...` : label;
       const modelTag = args.model
         ? ` [${args.model}${args.thinking ? `:${args.thinking}` : ""}]`
         : "";
       const completionTag = args.completion === "queue" ? " [queue]" : "";
       return new Text(
-        `${theme.fg("toolTitle", theme.bold(`Subagent: ${label}`))}${theme.fg("dim", modelTag + completionTag)}`,
+        `${theme.fg("toolTitle", theme.bold(`Subagent: ${shortLabel}`))}${theme.fg("dim", modelTag + completionTag)}`,
         0,
         0,
       );
