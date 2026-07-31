@@ -55,6 +55,7 @@ export interface BgJob {
   startedAt: number;
   sessionId?: string;
   controller: AbortController;
+  forceDispose?: () => void;
   kind: "shell" | "subagent";
   session?: AgentSession;
   activity?: string;

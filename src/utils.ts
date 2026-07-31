@@ -27,6 +27,19 @@ import {
   type SubagentRecord,
 } from "./types.js";
 
+export function sanitizeTerminalOutput(value: string) {
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[ -/]*[@-~]/g, "")
+    .replace(/\u009d[^\u0007]*(?:\u0007|\u009c)/g, "")
+    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, "")
+    .replace(
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0090-\u009f]/g,
+      "",
+    );
+}
+
 export function extractTextContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -69,7 +82,9 @@ export function renderToolResult(
   theme: Theme,
   previewLines: number,
 ) {
-  const text = extractTextContent(result.content).trim();
+  const text = sanitizeTerminalOutput(
+    extractTextContent(result.content).trim(),
+  );
   if (!text) return new Text("", 0, 0);
   if (options.expanded) return createMarkdownComponent(text, theme);
   const lines = text.split("\n");

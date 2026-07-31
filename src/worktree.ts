@@ -8,6 +8,23 @@ import type {
 import { SUBAGENT_WORKTREES } from "./types.js";
 import { ensurePrivateDir } from "./utils.js";
 
+export async function getGitBranch(
+  pi: ExtensionAPI,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const result = await pi.exec(
+      "git",
+      ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      { cwd, signal },
+    );
+    return result.code === 0 ? result.stdout.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getGitCommonDir(
   pi: ExtensionAPI,
   cwd: string,

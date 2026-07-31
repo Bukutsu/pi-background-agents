@@ -43,10 +43,16 @@ import {
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
+  sanitizeTerminalOutput,
   sanitizeForkMessages,
   saveRecord,
 } from "./utils.js";
-import { createWorktree, getGitCommonDir, removeWorktree } from "./worktree.js";
+import {
+  createWorktree,
+  getGitBranch,
+  getGitCommonDir,
+  removeWorktree,
+} from "./worktree.js";
 
 export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
@@ -84,10 +90,12 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         s.activity ??
         `${s.turns} turn${s.turns === 1 ? "" : "s"}, ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}${s.toolFailures ? `, ${s.toolFailures} failure${s.toolFailures === 1 ? "" : "s"}` : ""}`;
 
-      const thinkingStr = s.thinking ? `:${s.thinking}` : "";
-      return `${icon} ${s.state}  ${s.label}
-  Model: \`${s.model}${thinkingStr}\` | Session: \`${shortId}\`${durationStr}${costText}
-  Activity: ${activityStr}`;
+      const thinkingStr = s.thinking
+        ? `:${sanitizeTerminalOutput(s.thinking)}`
+        : "";
+      return `${icon} ${s.state}  ${sanitizeTerminalOutput(s.label)}
+  Model: \`${sanitizeTerminalOutput(s.model)}${thinkingStr}\` | Session: \`${sanitizeTerminalOutput(shortId)}\`${durationStr}${costText}
+  Activity: ${sanitizeTerminalOutput(activityStr)}`;
     });
 
     return cards.join("\n\n");
@@ -255,6 +263,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         sessionManager: SessionManager;
         existing?: boolean; // resume: keep saved model/thinking unless overridden
         checkSetup?: () => void; // spawn: guard against parent session end
+        setupSignal?: AbortSignal;
         shutdownHandler?: () => void; // caller controller to abort on ctx.shutdown()
       };
       const setupChildSession = async (opts: ChildSetupOptions) => {
@@ -384,7 +393,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               ),
             }),
           });
+          // Global extensions remain available for tools, but cannot inject
+          // project skills, prompts, or themes into an untrusted child.
+          resourceLoader.extendResources = () => {};
           await resourceLoader.reload();
+          checkSetup?.();
         }
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
@@ -415,19 +428,33 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
         const session = created.session;
         let disposed = false;
+        let forceDisposed = false;
+        const forceDispose = () => {
+          if (forceDisposed) return;
+          forceDisposed = true;
+          try {
+            session.dispose();
+          } catch {}
+        };
         const dispose = async () => {
           if (disposed) return;
           disposed = true;
-          try {
-            await session.extensionRunner.emit({
-              type: "session_shutdown",
-              reason: "quit",
-            });
-          } catch {}
-          try {
-            await session.dispose();
-          } catch {}
+          if (!forceDisposed) {
+            try {
+              await session.extensionRunner.emit({
+                type: "session_shutdown",
+                reason: "quit",
+              });
+            } catch {}
+          }
+          forceDispose();
         };
+        const abortSetup = forceDispose;
+        if (opts.setupSignal?.aborted) abortSetup();
+        else
+          opts.setupSignal?.addEventListener("abort", abortSetup, {
+            once: true,
+          });
         try {
           checkSetup?.();
           await session.bindExtensions({
@@ -452,6 +479,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         } catch (error) {
           await dispose();
           throw error;
+        } finally {
+          opts.setupSignal?.removeEventListener("abort", abortSetup);
         }
         if (!session.model) {
           await dispose();
@@ -471,6 +500,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           modelFallbackMessage: created.modelFallbackMessage,
           actualTools,
           dispose,
+          forceDispose,
         };
       };
 
@@ -578,85 +608,114 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           "context:fork is only valid for a new subagent session",
         );
 
-      const existing = requestedId ? findDurableRecord(requestedId) : undefined;
-      if (requestedId && !existing)
-        throw new Error(
-          `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
-        );
-      if (
-        existing &&
-        (!existsSync(existing.cwd) || !statSync(existing.cwd).isDirectory())
-      ) {
-        throw new Error(
-          `Cannot resume subagent ${requestedId}: saved cwd${existing.branch ? "/worktree" : ""} is missing or deleted: ${existing.cwd}`,
-        );
-      }
-      if (existing) {
-        // Only resume from paths this extension controls: the session file
-        // must be a regular file inside the pi-bg session dir, and the cwd
-        // inside the parent project or a pi-bg worktree. A tampered index
-        // must not redirect the child elsewhere.
-        let sessionFileReal = "";
-        try {
-          sessionFileReal = realpathSync(existing.sessionFile);
-        } catch {}
-        const sessionDirReal = realpathSync(SUBAGENT_SESSION_DIR);
+      let finishSetup!: () => void;
+      manager.track(
+        new Promise<void>((resolve) => {
+          finishSetup = resolve;
+        }),
+      );
+      let existing: SubagentRecord | undefined;
+      try {
+        existing = requestedId ? findDurableRecord(requestedId) : undefined;
+        if (requestedId && !existing)
+          throw new Error(
+            `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
+          );
         if (
-          !sessionFileReal.startsWith(sessionDirReal + sep) ||
-          !statSync(sessionFileReal).isFile()
+          existing &&
+          (!existsSync(existing.cwd) || !statSync(existing.cwd).isDirectory())
         ) {
           throw new Error(
-            `Cannot resume subagent ${requestedId}: session file is not a regular file inside ${SUBAGENT_SESSION_DIR}: ${existing.sessionFile}`,
+            `Cannot resume subagent ${requestedId}: saved cwd${existing.branch ? "/worktree" : ""} is missing or deleted: ${existing.cwd}`,
           );
         }
-        if (existing.branch) {
-          let cwdReal = "";
+        if (existing) {
+          // Only resume from paths this extension controls: the session file
+          // must be a regular file inside the pi-bg session dir, and the cwd
+          // inside the parent project or a pi-bg worktree. A tampered index
+          // must not redirect the child elsewhere.
+          let sessionFileReal = "";
           try {
-            cwdReal = realpathSync(existing.cwd);
+            sessionFileReal = realpathSync(existing.sessionFile);
           } catch {}
-          const worktreesReal = realpathSync(SUBAGENT_WORKTREES);
-          if (!cwdReal.startsWith(worktreesReal + sep)) {
+          const sessionDirReal = realpathSync(SUBAGENT_SESSION_DIR);
+          if (
+            !sessionFileReal.startsWith(sessionDirReal + sep) ||
+            !statSync(sessionFileReal).isFile()
+          ) {
             throw new Error(
-              `Cannot resume subagent ${requestedId}: worktree cwd is outside ${SUBAGENT_WORKTREES}: ${existing.cwd}`,
+              `Cannot resume subagent ${requestedId}: session file is not a regular file inside ${SUBAGENT_SESSION_DIR}: ${existing.sessionFile}`,
             );
           }
-          const [parentGitDir, worktreeGitDir] = await Promise.all([
-            getGitCommonDir(pi, ctx.cwd, setupSignal),
-            getGitCommonDir(pi, existing.cwd, setupSignal),
-          ]);
-          if (!parentGitDir || parentGitDir !== worktreeGitDir) {
+          if (existing.branch) {
+            let cwdReal = "";
+            try {
+              cwdReal = realpathSync(existing.cwd);
+            } catch {}
+            const worktreesReal = realpathSync(SUBAGENT_WORKTREES);
+            if (!cwdReal.startsWith(worktreesReal + sep)) {
+              throw new Error(
+                `Cannot resume subagent ${requestedId}: worktree cwd is outside ${SUBAGENT_WORKTREES}: ${existing.cwd}`,
+              );
+            }
+            const [parentGitDir, worktreeGitDir] = await Promise.all([
+              getGitCommonDir(pi, ctx.cwd, setupSignal),
+              getGitCommonDir(pi, existing.cwd, setupSignal),
+            ]);
+            if (!parentGitDir || parentGitDir !== worktreeGitDir) {
+              throw new Error(
+                `Cannot resume subagent ${requestedId}: worktree belongs to a different Git repository`,
+              );
+            }
+            const worktreeBranch = await getGitBranch(
+              pi,
+              existing.cwd,
+              setupSignal,
+            );
+            if (worktreeBranch !== existing.branch) {
+              throw new Error(
+                `Cannot resume subagent ${requestedId}: worktree is not on branch ${existing.branch}`,
+              );
+            }
+          } else if (
+            resolveSubagentCwd(ctx.cwd, existing.cwd) !== existing.cwd
+          ) {
             throw new Error(
-              `Cannot resume subagent ${requestedId}: worktree belongs to a different Git repository`,
+              `Cannot resume subagent ${requestedId}: saved cwd is outside the parent project: ${existing.cwd}`,
             );
           }
-        } else if (resolveSubagentCwd(ctx.cwd, existing.cwd) !== existing.cwd) {
-          throw new Error(
-            `Cannot resume subagent ${requestedId}: saved cwd is outside the parent project: ${existing.cwd}`,
-          );
         }
+      } catch (error) {
+        finishSetup();
+        throw error;
       }
 
       let branch: string | undefined;
       let childCwd: string;
       let isNewWorktree = false;
-      if (existing) {
-        childCwd = existing.cwd;
-        if (cwd) {
-          const resolvedCwd = resolveSubagentCwd(ctx.cwd, cwd);
-          if (resolvedCwd !== childCwd) {
-            throw new Error(
-              `cwd does not match the saved subagent cwd: ${childCwd}`,
-            );
+      try {
+        if (existing) {
+          childCwd = existing.cwd;
+          if (cwd) {
+            const resolvedCwd = resolveSubagentCwd(ctx.cwd, cwd);
+            if (resolvedCwd !== childCwd) {
+              throw new Error(
+                `cwd does not match the saved subagent cwd: ${childCwd}`,
+              );
+            }
           }
+          branch = existing.branch;
+        } else if (worktree) {
+          const created = await createWorktree(pi, ctx, setupSignal);
+          childCwd = created.path;
+          branch = created.branch;
+          isNewWorktree = true;
+        } else {
+          childCwd = resolveSubagentCwd(ctx.cwd, cwd);
         }
-        branch = existing.branch;
-      } else if (worktree) {
-        const created = await createWorktree(pi, ctx, setupSignal);
-        childCwd = created.path;
-        branch = created.branch;
-        isNewWorktree = true;
-      } else {
-        childCwd = resolveSubagentCwd(ctx.cwd, cwd);
+      } catch (error) {
+        finishSetup();
+        throw error;
       }
 
       let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
@@ -666,19 +725,20 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       let controller = new AbortController();
       let actualTools: string[];
       let disposeChild: () => Promise<void> = async () => {};
+      let forceDisposeChild: () => void = () => {};
+      let sessionManager!: SessionManager;
+      // Fresh sessions that fail before registration would leave an
+      // unindexed session file; remove it so nothing orphaned accumulates.
+      const removeFreshSessionFile = () => {
+        if (!existing) {
+          try {
+            rmSync(sessionManager?.getSessionFile() ?? "", { force: true });
+          } catch {}
+        }
+      };
 
       try {
         checkSetup();
-        let sessionManager!: SessionManager;
-        // Fresh sessions that fail before registration would leave an
-        // unindexed session file; remove it so nothing orphaned accumulates.
-        const removeFreshSessionFile = () => {
-          if (!existing) {
-            try {
-              rmSync(sessionManager?.getSessionFile() ?? "", { force: true });
-            } catch {}
-          }
-        };
         const removeLock = () => {
           try {
             rmSync(sessionLock, { recursive: true, force: true });
@@ -723,8 +783,10 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             sessionManager,
             existing: Boolean(existing),
             checkSetup,
+            setupSignal,
             shutdownHandler: () => controller.abort(),
           });
+          checkSetup();
         } catch (error) {
           // setupChildSession disposes anything it created; free the lock and
           // any fresh session file here
@@ -735,6 +797,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         session = prepared.session;
         modelFallbackMessage = prepared.modelFallbackMessage;
         actualTools = prepared.actualTools;
+        forceDisposeChild = prepared.forceDispose;
         disposeChild = async () => {
           await prepared.dispose();
           removeLock();
@@ -773,9 +836,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         if (isNewWorktree) {
           await removeWorktree(pi, ctx.cwd, childCwd, branch);
         }
+        finishSetup();
         throw setupError;
       }
 
+      finishSetup();
       const pid = manager.nextVirtualPid++;
       let timedOut = false;
       let cancelled = false;
@@ -794,9 +859,10 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           { once: true },
         );
       }
-      const label =
+      const label = sanitizeTerminalOutput(
         description?.trim() ||
-        (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt);
+          (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt),
+      );
       const displayModel = `${session.model.provider}/${session.model.id}`;
       const fallback = modelFallbackMessage
         ? `\nModel fallback: ${modelFallbackMessage}`
@@ -828,26 +894,29 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         context: existing?.context ?? context,
         ownerPid: process.pid,
       };
-      const job: BgJob = {
-        pid,
-        command: `Subagent: ${label}`,
-        startedAt: Date.now(),
-        sessionId: session.sessionId,
-        controller,
-        kind: "subagent",
-        session,
-        activity: "starting",
-        completion,
-        baseline: session.getSessionStats(),
-        record,
-        toolFailures: 0,
-      };
+      let job!: BgJob;
       try {
+        job = {
+          pid,
+          command: `Subagent: ${label}`,
+          startedAt: Date.now(),
+          sessionId: session.sessionId,
+          controller,
+          forceDispose: forceDisposeChild,
+          kind: "subagent",
+          session,
+          activity: "starting",
+          completion,
+          baseline: session.getSessionStats(),
+          record,
+          toolFailures: 0,
+        };
         manager.jobs.set(pid, job);
         saveRecord(record);
       } catch (error) {
-        manager.jobs.delete(pid);
         await disposeChild();
+        manager.jobs.delete(pid);
+        removeFreshSessionFile();
         if (isNewWorktree) {
           await removeWorktree(pi, ctx.cwd, childCwd, branch);
         }
@@ -983,8 +1052,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         } finally {
           clearTimeout(timer);
           unsubscribe();
-          manager.jobs.delete(pid);
           await disposeChild();
+          manager.jobs.delete(pid);
           manager.syncStatus(ctx);
         }
       })();
@@ -1021,13 +1090,15 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       };
     },
     renderCall(args, theme) {
+      const safe = (value: unknown) =>
+        sanitizeTerminalOutput(String(value ?? ""));
       const action = args.action ?? "spawn";
       if (action === "status")
         return new Text(
           theme.fg(
             "toolTitle",
             theme.bold(
-              `Subagent status${args.sessionId ? `: ${args.sessionId}` : ""}`,
+              `Subagent status${args.sessionId ? `: ${safe(args.sessionId)}` : ""}`,
             ),
           ),
           0,
@@ -1037,7 +1108,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         return new Text(
           theme.fg(
             "toolTitle",
-            theme.bold(`Stop subagent ${args.sessionId ?? ""}`),
+            theme.bold(`Stop subagent ${safe(args.sessionId)}`),
           ),
           0,
           0,
@@ -1047,17 +1118,19 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           theme.fg(
             "toolTitle",
             theme.bold(
-              `Steer subagent ${args.sessionId ?? ""}: ${args.message ?? ""}`,
+              `Steer subagent ${safe(args.sessionId)}: ${safe(args.message)}`,
             ),
           ),
           0,
           0,
         );
 
-      const label = args.description || args.prompt || "...";
+      const label = sanitizeTerminalOutput(
+        String(args.description || args.prompt || "..."),
+      );
       const shortLabel = label.length > 30 ? `${label.slice(0, 30)}...` : label;
       const modelTag = args.model
-        ? ` [${args.model}${args.thinking ? `:${args.thinking}` : ""}]`
+        ? ` [${safe(args.model)}${args.thinking ? `:${safe(args.thinking)}` : ""}]`
         : "";
       const completionTag = args.completion === "queue" ? " [queue]" : "";
       return new Text(

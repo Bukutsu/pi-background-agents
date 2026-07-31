@@ -15,20 +15,7 @@ import { Type } from "typebox";
 import type { JobManager } from "./manager.js";
 import type { BgJob } from "./types.js";
 import { getLogDir } from "./types.js";
-import { renderToolResult } from "./utils.js";
-
-function sanitizeTerminalOutput(value: string) {
-  return value
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1b[ -/]*[@-~]/g, "")
-    .replace(/\u009d[^\u0007]*(?:\u0007|\u009c)/g, "")
-    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, "")
-    .replace(
-      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0090-\u009f]/g,
-      "",
-    );
-}
+import { renderToolResult, sanitizeTerminalOutput } from "./utils.js";
 
 export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   const MAX_CMD_LEN = 120;
@@ -40,10 +27,11 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   ) {
     const expectedGeneration = manager.generation;
     manager.guard(expectedGeneration);
+    const safeCommand = sanitizeTerminalOutput(command);
     const shownCommand =
-      command.length > MAX_CMD_LEN
-        ? `${command.slice(0, MAX_CMD_LEN - 3)}...`
-        : command;
+      safeCommand.length > MAX_CMD_LEN
+        ? `${safeCommand.slice(0, MAX_CMD_LEN - 3)}...`
+        : safeCommand;
     const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
     const abortFromShutdown = () => controller.abort();
@@ -91,8 +79,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           timeout: timeoutSec,
           env,
           onData(data) {
-            const chunk = sanitizeTerminalOutput(data.toString());
-            const truncated = truncateTail(output + chunk);
+            const truncated = truncateTail(output + data.toString());
             outputTruncated ||= truncated.truncated;
             output = truncated.content;
           },
@@ -108,7 +95,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       const timedOut = message.startsWith("timeout:");
       const cancelled = controller.signal.aborted && !timedOut;
       const failed = Boolean(error) && !cancelled && !timedOut;
-      const content = output.trim();
+      const content = sanitizeTerminalOutput(output.trim());
       const keepLog =
         cancelled || timedOut || failed || exitCode !== 0 || outputTruncated;
       let logFile = "";
@@ -189,7 +176,10 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
         return;
       }
       if (trimmed) {
-        ctx.ui.notify(`Unknown /bg command: ${trimmed}`, "error");
+        ctx.ui.notify(
+          `Unknown /bg command: ${sanitizeTerminalOutput(trimmed)}`,
+          "error",
+        );
         return;
       }
 
@@ -307,7 +297,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           0,
           0,
         );
-      const cmd = args.command || "...";
+      const cmd = sanitizeTerminalOutput(String(args.command || "..."));
       const completionTag =
         args.completion === "queue" ? theme.fg("dim", " [queue]") : "";
       return new Text(

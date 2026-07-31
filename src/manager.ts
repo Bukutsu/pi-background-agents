@@ -21,6 +21,7 @@ import {
   getScopedModels,
   processIsAlive,
   readIndex,
+  sanitizeTerminalOutput,
   saveRecord,
   usageSince,
 } from "./utils.js";
@@ -159,8 +160,12 @@ export class JobManager {
         }
       }
       let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
+      let shutdownTimedOut = false;
       const timeoutPromise = new Promise<void>((resolve) => {
-        shutdownTimeout = setTimeout(resolve, 10000);
+        shutdownTimeout = setTimeout(() => {
+          shutdownTimedOut = true;
+          resolve();
+        }, 10000);
         shutdownTimeout.unref();
       });
       try {
@@ -168,6 +173,15 @@ export class JobManager {
           Promise.allSettled([...this.pending]),
           timeoutPromise,
         ]);
+        if (shutdownTimedOut) {
+          for (const job of this.jobs.values()) {
+            if (job.kind === "subagent") {
+              try {
+                job.forceDispose?.();
+              } catch {}
+            }
+          }
+        }
       } finally {
         if (shutdownTimeout) clearTimeout(shutdownTimeout);
       }
@@ -234,12 +248,14 @@ export class JobManager {
                   ? theme.fg("accent", "⚡")
                   : theme.fg("success", "●");
               const progress = job.activity
-                ? `, ${truncateToWidth(job.activity, 24)}`
+                ? `, ${truncateToWidth(sanitizeTerminalOutput(job.activity), 24)}`
                 : "";
               const badgeText = job.session?.model
-                ? `${job.session.model.id}:${job.session.thinkingLevel}`
+                ? sanitizeTerminalOutput(
+                    `${job.session.model.id}:${job.session.thinkingLevel}`,
+                  )
                 : job.kind === "subagent" && job.record?.model
-                  ? job.record.model
+                  ? sanitizeTerminalOutput(job.record.model)
                   : undefined;
               const kindTag = job.kind === "subagent" ? " [sub]" : "";
               const queueTag = job.completion === "queue" ? " Q" : "";
@@ -254,10 +270,11 @@ export class JobManager {
                 0,
                 innerWidth - visibleWidth(prefix) - visibleWidth(meta),
               );
+              const command = sanitizeTerminalOutput(job.command);
               const truncatedCmd =
-                visibleWidth(job.command) > availForCmd
-                  ? truncateToWidth(job.command, availForCmd)
-                  : job.command;
+                visibleWidth(command) > availForCmd
+                  ? truncateToWidth(command, availForCmd)
+                  : command;
               const content = `${prefix}${truncatedCmd}${meta}`;
               const fill = " ".repeat(
                 Math.max(0, innerWidth - visibleWidth(content)),
@@ -306,7 +323,11 @@ export class JobManager {
     ctx: ExtensionContext,
   ) {
     this.pi.sendMessage(
-      { customType: "pi-bg-result", content: message, display: true },
+      {
+        customType: "pi-bg-result",
+        content: sanitizeTerminalOutput(message),
+        display: true,
+      },
       completion === "queue"
         ? { deliverAs: "nextTurn" }
         : { deliverAs: "steer", triggerTurn: ctx.isIdle() },

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6
+
+- Security: untrusted child extensions can no longer inject skills, prompts, or themes after resource discovery.
+- Security: terminal sanitization now handles chunk-split ANSI/OSC sequences and all parent TUI/message boundaries.
+- Security: worktree resumes require both repository and branch identity to match the saved record.
+- Lifecycle: subagent setup is tracked during shutdown; created sessions use an idempotent force-dispose path after the shutdown grace period while locks remain protected until settlement.
+- Fix: setup and registration failures retain job visibility until child disposal completes; fresh session cleanup covers index-write failures.
+
 ## 0.4.5
 
 - Security: worktree resumes now require the saved worktree and current project to share the same Git repository.
