@@ -60,9 +60,13 @@ export async function removeWorktree(
   } catch {}
   let removed = false;
   try {
-    const res = await pi.exec("git", ["worktree", "remove", "--force", path], {
-      cwd: root,
-    });
+    const res = await pi.exec(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", path],
+      {
+        cwd: root,
+      },
+    );
     removed = res.code === 0;
   } catch {}
   try {

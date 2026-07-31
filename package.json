@@ -1,6 +1,6 @@
 {
   "name": "pi-background-agents",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Background shell jobs and SDK-native subagents for Pi",
   "type": "module",
   "keywords": [

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.10
+
+- Security: disabled Git hooks (`core.hooksPath=/dev/null`) during `git worktree remove` calls for consistency with worktree creation.
+- Security: reject ambiguous fuzzy model specifiers when matching against active `scopedModels`.
+
 ## 0.4.9
 
 - Docs: humanized documentation prose and clarified `scopedModels` handling when requesting subagent model overrides.

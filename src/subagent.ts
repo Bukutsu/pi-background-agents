@@ -305,15 +305,21 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
                 `${s.model.provider}/${s.model.id}`.toLowerCase() ===
                   lowerSpec || s.model.id.toLowerCase() === lowerSpec,
             );
-            const matched =
-              exact ??
-              scopedList.find(
-                (s) =>
-                  s.model.id.toLowerCase().includes(lowerSpec) ||
-                  (s.model.name &&
-                    String(s.model.name).toLowerCase().includes(lowerSpec)) ||
-                  s.model.provider.toLowerCase().includes(lowerSpec),
+            const matches = scopedList.filter(
+              (s) =>
+                s.model.id.toLowerCase().includes(lowerSpec) ||
+                (s.model.name &&
+                  String(s.model.name).toLowerCase().includes(lowerSpec)) ||
+                s.model.provider.toLowerCase().includes(lowerSpec),
+            );
+            let matched = exact;
+            if (!matched && matches.length === 1) {
+              matched = matches[0];
+            } else if (!matched && matches.length > 1) {
+              throw new Error(
+                `Ambiguous model specifier '${modelSpec}' matched multiple scoped models: ${matches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
               );
+            }
             if (matched) {
               resolvedModel = matched.model;
               resolvedThinking = matched.thinkingLevel as
