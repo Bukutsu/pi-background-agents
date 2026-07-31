@@ -180,16 +180,32 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   pi.registerCommand("bg", {
     description: "List and manage background jobs",
     getArgumentCompletions: (prefix) => {
-      const items = Array.from(manager.jobs.values(), (job) => ({
-        value: `kill ${job.pid}`,
-        label: `kill ${job.pid}`,
-        description: job.command,
-      })).filter((item) => item.value.startsWith(prefix));
+      const items = [
+        {
+          value: "kill all",
+          label: "kill all",
+          description: "Stop all background jobs",
+        },
+        ...Array.from(manager.jobs.values(), (job) => ({
+          value: `kill ${job.pid}`,
+          label: `kill ${job.pid}`,
+          description: job.command,
+        })),
+      ].filter((item) => item.value.startsWith(prefix));
       return items.length ? items : null;
     },
     handler: async (args, ctx) => {
       manager.currentCtx = ctx;
       const trimmed = args?.trim() ?? "";
+      if (/^kill\s+all$/i.test(trimmed)) {
+        const stopped = manager.killAllJobs();
+        ctx.ui.notify(
+          `Stopped ${stopped} background job${stopped === 1 ? "" : "s"}`,
+          "info",
+        );
+        manager.syncStatus(ctx);
+        return;
+      }
       const killMatch = trimmed.match(/^kill\s+(\d+)$/);
       if (killMatch) {
         const pid = Number(killMatch[1]);

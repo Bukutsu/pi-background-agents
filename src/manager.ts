@@ -402,6 +402,14 @@ export class JobManager {
     return true;
   }
 
+  public killAllJobs(): number {
+    let stopped = 0;
+    for (const pid of this.jobs.keys()) {
+      if (this.killJob(pid)) stopped++;
+    }
+    return stopped;
+  }
+
   public currentRecord(job: BgJob): SubagentRecord {
     if (!job.session || !job.record || !job.baseline)
       throw new Error("currentRecord called on an incomplete job");
@@ -426,12 +434,22 @@ export class JobManager {
       return ctx.ui.notify("No background jobs running", "info");
     const choice = await ctx.ui.select("Select job to stop:", [
       "Cancel",
+      "Stop all",
       ...Array.from(
         this.jobs.values(),
         (job) =>
           `[${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
       ),
     ]);
+    if (choice === "Stop all") {
+      const stopped = this.killAllJobs();
+      ctx.ui.notify(
+        `Stopped ${stopped} background job${stopped === 1 ? "" : "s"}`,
+        "info",
+      );
+      this.syncStatus(ctx);
+      return;
+    }
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
     if (choice !== "Cancel" && Number.isInteger(pid) && this.killJob(pid)) {
       ctx.ui.notify(`Stopped background job ${pid}`, "info");
