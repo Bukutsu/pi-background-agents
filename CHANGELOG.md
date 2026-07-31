@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Removed the blocking `tasks` parallel mode; parallel work now uses multiple `subagent` spawns in one turn, each running in the background.
+
 ## 0.3.0
 
 - Added custom native Pi TUI renderers (`renderCall` and `renderResult`) for `bg` and `subagent` tools.

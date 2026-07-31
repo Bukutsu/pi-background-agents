@@ -103,7 +103,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       "Provide complete and self-contained instructions in prompt; use context:fork only when the child needs the parent's current conversation.",
       "Reuse sessionId from an earlier subagent result to continue its saved model, thinking level, cwd, and conversation.",
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
-      "For independent tasks that don't depend on each other, use tasks:[{prompt,model?},{prompt,model?}] with concurrency:4 to run them in parallel.",
+      "For independent tasks that don't depend on each other, spawn multiple subagents in one turn; each runs in the background and its result arrives as it finishes.",
       "For sequential subagent workflows (scout \u2192 plan \u2192 implement), use chain:[{prompt},{prompt}] and use {previous} in later prompts to reference prior output.",
       "Use worktree:true for concurrent writing subagents; pi-background-agents creates but never merges or removes the branch/worktree.",
       "After starting subagent, continue work immediately; never wait, sleep, or poll action:status for completion. Results arrive automatically.",
@@ -181,26 +181,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           description: "Timeout in seconds (default: 600)",
         }),
       ),
-      tasks: Type.Optional(
-        Type.Array(
-          Type.Object({
-            prompt: Type.String({ description: "Task for this subagent" }),
-            description: Type.Optional(Type.String({ description: "Short label" })),
-            model: Type.Optional(Type.String({ description: "Model override" })),
-            thinking: Type.Optional(
-              StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const, {
-                description: "Thinking level",
-              }),
-            ),
-            tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist" })),
-            cwd: Type.Optional(Type.String({ description: "Working directory" })),
-            timeoutSec: Type.Optional(
-              Type.Number({ minimum: 1, maximum: 2_147_483, description: "Timeout in seconds" }),
-            ),
-          }),
-          { description: "Run multiple subagents in parallel", maxItems: 16 },
-        ),
-      ),
       chain: Type.Optional(
         Type.Array(
           Type.Object({
@@ -221,9 +201,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           { description: "Run subagents sequentially with {previous} substitution", maxItems: 8 },
         ),
       ),
-      concurrency: Type.Optional(
-        Type.Number({ description: "Max parallel tasks (default: 4)", minimum: 1, maximum: 8 }),
-      ),
     }),
     async execute(
       _id,
@@ -241,9 +218,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         worktree = false,
         context = "project",
         timeoutSec = 600,
-        tasks,
         chain,
-        concurrency,
       },
       signal,
       _up,
@@ -266,8 +241,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         ? findActiveSubagent(requestedId)
         : undefined;
 
-      // ── runSubagentSession: shared helper for tasks and chain ──
-      type TaskItem = {
+      // ── runSubagentSession: shared helper for chain steps ──
+      type ChainItem = {
         prompt: string;
         description?: string;
         model?: string;
@@ -277,8 +252,211 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         timeoutSec?: number;
         [key: string]: unknown;
       };
+      // ── setupChildSession: shared child-session setup for spawn and chain ──
+      // Model resolution, tool allowlist, session creation, and extension
+      // binding. Divergent orchestration (locks, worktrees, fork/resume,
+      // durable records) stays in the callers.
+      type ChildSetupOptions = {
+        cwd: string;
+        model?: string;
+        thinking?: ThinkingLevel;
+        tools?: string;
+        sessionManager: SessionManager;
+        existing?: boolean; // resume: keep saved model/thinking unless overridden
+        checkSetup?: () => void; // spawn: guard against parent session end
+      };
+      const setupChildSession = async (opts: ChildSetupOptions) => {
+        const { existing = false, checkSetup } = opts;
+        modelRuntime ??= ModelRuntime.create();
+        const runtime = await modelRuntime;
+        checkSetup?.();
+        for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
+          try {
+            const native =
+              ctx.modelRegistry.getRegisteredNativeProvider(providerId);
+            const config =
+              ctx.modelRegistry.getRegisteredProviderConfig(providerId);
+            if (native) {
+              runtime.registerNativeProvider(native);
+            } else if (config) {
+              runtime.registerProvider(providerId, config);
+            } else {
+              const provider = ctx.modelRegistry.getProvider(providerId);
+              if (provider) {
+                runtime.registerNativeProvider(provider);
+              }
+            }
+          } catch (providerError) {
+            console.warn(
+              `Could not forward provider ${providerId} to subagent runtime:`,
+              providerError,
+            );
+          }
+        }
+        const modelSpec = opts.model?.trim();
+        let resolvedModel: Model<any> | undefined;
+        let resolvedThinking: ThinkingLevel | undefined;
+        const scopedList = getScopedModels(ctx);
+        if (modelSpec) {
+          if (scopedList && scopedList.length > 0) {
+            const lowerSpec = modelSpec.toLowerCase();
+            const exact = scopedList.find(
+              (s) =>
+                `${s.model.provider}/${s.model.id}`.toLowerCase() ===
+                  lowerSpec || s.model.id.toLowerCase() === lowerSpec,
+            );
+            const matched =
+              exact ??
+              scopedList.find(
+                (s) =>
+                  s.model.id.toLowerCase().includes(lowerSpec) ||
+                  (s.model.name &&
+                    String(s.model.name).toLowerCase().includes(lowerSpec)) ||
+                  s.model.provider.toLowerCase().includes(lowerSpec),
+              );
+            if (matched) {
+              resolvedModel = matched.model;
+              resolvedThinking = (opts.thinking ??
+                matched.thinkingLevel) as ThinkingLevel | undefined;
+            } else {
+              const availableNames = scopedList
+                .map((s) => `${s.model.provider}/${s.model.id}`)
+                .join(", ");
+              throw new Error(
+                `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
+              );
+            }
+          } else {
+            const resolved = resolveCliModel({
+              cliModel: modelSpec,
+              cliThinking: opts.thinking,
+              modelRuntime: runtime,
+            });
+            if (resolved.error) throw new Error(resolved.error);
+            if (resolved.warning) console.warn(resolved.warning);
+            resolvedModel = resolved.model;
+            resolvedThinking = (opts.thinking ??
+              resolved.thinkingLevel) as ThinkingLevel | undefined;
+          }
+        }
+        const parentTools = pi
+          .getActiveTools()
+          .filter((name) => name !== "bg" && name !== "subagent");
+        const requestedTools = opts.tools
+          ?.split(",")
+          .map((tool) => tool.trim())
+          .filter(Boolean);
+        const unknownTools =
+          requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
+        if (unknownTools.length)
+          throw new Error(
+            `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
+          );
+        const childTools = requestedTools ?? parentTools;
+        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
+        const requestedThinking = opts.thinking ?? resolvedThinking;
+        const scopedEntry =
+          !resolvedModel && !existing
+            ? (scopedList?.find(
+                (s) =>
+                  s.model.id === ctx.model?.id &&
+                  s.model.provider === ctx.model?.provider,
+              ) ?? scopedList?.[0])
+            : undefined;
+        const selectedModel =
+          resolvedModel ??
+          (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
+        const effectiveThinking =
+          requestedThinking ??
+          (!existing
+            ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
+            : undefined);
+        checkSetup?.();
+        const setupController = new AbortController();
+        let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+        try {
+          created = await createAgentSession({
+            cwd: opts.cwd,
+            tools: childTools,
+            excludeTools: ["bg", "subagent"],
+            modelRuntime: runtime,
+            sessionManager: opts.sessionManager,
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(!existing
+              ? { thinkingLevel: effectiveThinking as ThinkingLevel }
+              : requestedThinking
+                ? { thinkingLevel: requestedThinking as ThinkingLevel }
+                : {}),
+          });
+          checkSetup?.();
+        } catch (error) {
+          if (created) {
+            try {
+              await created.session.dispose();
+            } catch {}
+          }
+          throw error;
+        }
+        const session = created.session;
+        let disposed = false;
+        const dispose = async () => {
+          if (disposed) return;
+          disposed = true;
+          try {
+            await session.extensionRunner.emit({
+              type: "session_shutdown",
+              reason: "quit",
+            });
+          } catch {}
+          try {
+            await session.dispose();
+          } catch {}
+        };
+        try {
+          checkSetup?.();
+          await session.bindExtensions({
+            mode: "print",
+            abortHandler: () => void session.abort(),
+            shutdownHandler: () => setupController.abort(),
+            onError: (error) =>
+              console.warn(`Subagent extension error: ${error.error}`),
+          });
+          checkSetup?.();
+          if (setupController.signal.aborted)
+            throw new Error(
+              "Subagent extension requested shutdown during setup",
+            );
+          for (const error of created.extensionsResult.errors)
+            console.warn(
+              `Subagent extension failed to load ${error.path}: ${error.error}`,
+            );
+        } catch (error) {
+          await dispose();
+          throw error;
+        }
+        if (!session.model) {
+          await dispose();
+          throw new Error("Subagent session did not initialize a model");
+        }
+        const actualTools = session.getActiveToolNames();
+        const missingTools =
+          requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
+        if (missingTools.length) {
+          await dispose();
+          throw new Error(
+            `Requested tools were not available in the child: ${missingTools.join(", ")}`,
+          );
+        }
+        return {
+          session,
+          modelFallbackMessage: created.modelFallbackMessage,
+          actualTools,
+          dispose,
+        };
+      };
+
       const runSubagentSession = async (
-        item: TaskItem,
+        item: ChainItem,
         itemSignal?: AbortSignal,
       ): Promise<{
         text: string;
@@ -293,110 +471,24 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       }> => {
         const startMs = Date.now();
         const itemCwd = resolveSubagentCwd(ctx.cwd, item.cwd);
-        modelRuntime ??= ModelRuntime.create();
-        const runtime = await modelRuntime;
-        for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-          try {
-            const native = ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-            const config = ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-            if (native) runtime.registerNativeProvider(native);
-            else if (config) runtime.registerProvider(providerId, config);
-            else {
-              const provider = ctx.modelRegistry.getProvider(providerId);
-              if (provider) runtime.registerNativeProvider(provider);
-            }
-          } catch {}
-        }
-        const modelSpec = item.model?.trim();
-        let resolvedModel: Model<any> | undefined;
-        let resolvedThinking: string | undefined;
-        const scopedList = getScopedModels(ctx);
-        if (modelSpec) {
-          if (scopedList?.length) {
-            const lower = modelSpec.toLowerCase();
-            const matched =
-              scopedList.find(
-                (s) =>
-                  `${s.model.provider}/${s.model.id}`.toLowerCase() === lower ||
-                  s.model.id.toLowerCase() === lower,
-              ) ??
-              scopedList.find((s) => s.model.id.toLowerCase().includes(lower));
-            if (matched) {
-              resolvedModel = matched.model;
-              resolvedThinking = (item.thinking ?? matched.thinkingLevel) as ThinkingLevel | undefined;
-            } else throw new Error(`Model '${modelSpec}' not in scope`);
-          } else {
-            const resolved = resolveCliModel({
-              cliModel: modelSpec,
-              cliThinking: item.thinking as ThinkingLevel | undefined,
-              modelRuntime: runtime,
-            });
-            if (resolved.error) throw new Error(resolved.error);
-            resolvedModel = resolved.model;
-            resolvedThinking = (item.thinking ?? resolved.thinkingLevel) as ThinkingLevel | undefined;
-          }
-        }
-        const parentTools = pi.getActiveTools().filter((n) => n !== "bg" && n !== "subagent");
-        const requestedTools = item.tools
-          ?.split(",")
-          .map((t) => t.trim())
-          .filter(Boolean);
-        const unknownTools = requestedTools?.filter((t) => !parentTools.includes(t)) ?? [];
-        if (unknownTools.length) throw new Error(`Tools not in parent session: ${unknownTools.join(", ")}`);
-        const childTools = requestedTools ?? parentTools;
-        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
-        const sm = SessionManager.create(itemCwd, SUBAGENT_SESSION_DIR);
-        const scopedEntry =
-          !resolvedModel
-            ? (scopedList?.find(
-                (s) =>
-                  s.model.id === ctx.model?.id &&
-                  s.model.provider === ctx.model?.provider,
-              ) ?? scopedList?.[0])
-            : undefined;
-        const selectedModel = resolvedModel ?? scopedEntry?.model ?? ctx.model;
-        const effectiveThinking =
-          (item.thinking ?? resolvedThinking) ??
-          (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel);
-        const created = await createAgentSession({
+        const sessionManager = SessionManager.create(
+          itemCwd,
+          SUBAGENT_SESSION_DIR,
+        );
+        const { session, dispose } = await setupChildSession({
           cwd: itemCwd,
-          tools: childTools,
-          excludeTools: ["bg", "subagent"],
-          modelRuntime: runtime,
-          sessionManager: sm,
-          ...(selectedModel ? { model: selectedModel } : {}),
-          thinkingLevel: (effectiveThinking || undefined) as ThinkingLevel | undefined,
+          model: item.model,
+          thinking: item.thinking as ThinkingLevel | undefined,
+          tools: item.tools,
+          sessionManager,
         });
-        let disposed = false;
-        const dispose = async () => {
-          if (disposed) return;
-          disposed = true;
-          try {
-            await created.session.extensionRunner.emit({
-              type: "session_shutdown",
-              reason: "quit",
-            });
-          } catch {}
-          try {
-            await created.session.dispose();
-          } catch {}
-        };
         try {
-          await created.session.bindExtensions({
-            mode: "print",
-            abortHandler: () => void created.session.abort(),
-            shutdownHandler: () => {},
-            onError: () => {},
-          });
-          for (const e of created.extensionsResult.errors)
-            console.warn(`Subagent extension error: ${e.path}: ${e.error}`);
-          if (!created.session.model) throw new Error("No model initialized");
           const timeoutMs = (item.timeoutSec ?? 600) * 1000;
           const ac = new AbortController();
           const timer = setTimeout(() => ac.abort(), timeoutMs);
           let thrown: string | undefined;
           let lastMsg: AssistantMessage | undefined;
-          const unsub = created.session.subscribe((ev) => {
+          const unsub = session.subscribe((ev) => {
             if (
               (ev.type === "message_update" || ev.type === "message_end") &&
               ev.message.role === "assistant"
@@ -405,7 +497,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           });
           try {
             if (itemSignal?.aborted) ac.abort();
-            if (!ac.signal.aborted) await created.session.prompt(item.prompt);
+            if (!ac.signal.aborted) await session.prompt(item.prompt);
           } catch (e) {
             thrown = e instanceof Error ? e.message : String(e);
           } finally {
@@ -419,9 +511,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           const toolCount = (assistant?.content?.filter((c: any) => c.type === "toolUse" || c.type === "toolCall") ?? []).length;
           return {
             text: thrown ? `Error: ${thrown}` : (text || "(no output)"),
-            sessionId: created.session.sessionId,
-            model: `${created.session.model.provider}/${created.session.model.id}`,
-            thinking: created.session.thinkingLevel,
+            sessionId: session.sessionId,
+            model: `${session.model!.provider}/${session.model!.id}`,
+            thinking: session.thinkingLevel,
             turns,
             toolCount,
             cost,
@@ -433,14 +525,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
       };
 
-      // ── Parallel tasks ──
-      if ((tasks && tasks.length > 0) || (chain && chain.length > 0)) {
-        const items = tasks ?? chain!;
-        const isChain = !!chain;
-        const effectiveLimit = isChain ? 1 : Math.min(concurrency ?? 4, 8);
+      // ── Chain: sequential with {previous} substitution ──
+      if (chain && chain.length > 0) {
         const combine = (results: Awaited<ReturnType<typeof runSubagentSession>>[]) => {
           const parts = results.map((r, i) => {
-            const tag = isChain ? `Step ${i + 1}` : `Task ${i + 1}`;
+            const tag = `Step ${i + 1}`;
             const icon = r.error ? "✗" : "✓";
             const errNote = r.error ? ` (failed)` : "";
             const head = `${icon} ${tag}: ${r.text.slice(0, 120)}${r.text.length > 120 ? "..." : ""}`;
@@ -449,59 +538,23 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           });
           const failed = results.filter((r) => r.error);
           const succeeded = results.filter((r) => !r.error);
-          const summary = `\n\n— ${isChain ? "Chain" : "Parallel"} finished: ${succeeded.length} succeeded, ${failed.length} failed`;
+          const summary = `\n\n— Chain finished: ${succeeded.length} succeeded, ${failed.length} failed`;
           return {
             content: [{ type: "text" as const, text: parts.join("\n\n") + summary }],
-            details: { mode: isChain ? "chain" : "parallel", results },
+            details: { mode: "chain", results },
             ...(failed.length > 0 ? { isError: true } : {}),
           };
         };
-
-        if (isChain) {
-          // Chain: sequential with {previous} substitution
-          let previous = "";
-          const results: Awaited<ReturnType<typeof runSubagentSession>>[] = [];
-          for (const step of chain!) {
-            const stepPrompt = step.prompt.replace("{previous}", previous || "(no prior output)");
-            const r = await runSubagentSession({ ...step, prompt: stepPrompt }, signal);
-            results.push(r);
-            previous = r.text;
-            if (r.error) break; // stop on first failure
-          }
-          return combine(results);
+        let previous = "";
+        const results: Awaited<ReturnType<typeof runSubagentSession>>[] = [];
+        for (const step of chain) {
+          const stepPrompt = step.prompt.replace("{previous}", previous || "(no prior output)");
+          const r = await runSubagentSession({ ...step, prompt: stepPrompt }, signal);
+          results.push(r);
+          previous = r.text;
+          if (r.error) break; // stop on first failure
         }
-
-        // Parallel: run with concurrency limit
-        const taskList = tasks!;
-        const results: (Awaited<ReturnType<typeof runSubagentSession>> | null)[] = taskList.map(() => null);
-        let nextIdx = 0;
-        const running = new Set<Promise<void>>();
-        const pump = async (): Promise<void> => {
-          while (nextIdx < taskList.length) {
-            if (running.size >= effectiveLimit) await Promise.race(running);
-            const idx = nextIdx++;
-            const p = runSubagentSession(taskList[idx], signal)
-              .then((r) => { results[idx] = r; })
-              .catch((e) => {
-                results[idx] = {
-                  error: String(e),
-                  text: `Crash: ${e}`,
-                  sessionId: "",
-                  model: "",
-                  thinking: undefined,
-                  turns: 0,
-                  toolCount: 0,
-                  cost: 0,
-                  durationSec: 0,
-                };
-              });
-            running.add(p);
-            p.finally(() => running.delete(p));
-          }
-        };
-        await pump();
-        if (running.size > 0) await Promise.allSettled(running);
-        return combine(results as Awaited<ReturnType<typeof runSubagentSession>>[]);
+        return combine(results);
       }
 
       if (action === "status") {
@@ -643,9 +696,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
       let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
       let modelFallbackMessage: string | undefined;
-      let extensionsResult: Awaited<
-        ReturnType<typeof createAgentSession>
-      >["extensionsResult"];
       let sessionFile: string;
       let sessionLock: string;
       let controller: AbortController;
@@ -653,95 +703,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       let disposeChild: () => Promise<void> = async () => {};
 
       try {
-        modelRuntime ??= ModelRuntime.create();
-        const runtime = await modelRuntime;
         checkSetup();
-        for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-          try {
-            const native =
-              ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-            const config =
-              ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-            if (native) {
-              runtime.registerNativeProvider(native);
-            } else if (config) {
-              runtime.registerProvider(providerId, config);
-            } else {
-              const provider = ctx.modelRegistry.getProvider(providerId);
-              if (provider) {
-                runtime.registerNativeProvider(provider);
-              }
-            }
-          } catch (providerError) {
-            console.warn(
-              `Could not forward provider ${providerId} to subagent runtime:`,
-              providerError,
-            );
-          }
-        }
-
-        const modelSpec = model?.trim();
-        let resolvedModel: Model<any> | undefined;
-        let resolvedThinking: string | undefined;
-
-        const scopedList = getScopedModels(ctx);
-        if (modelSpec) {
-          if (scopedList && scopedList.length > 0) {
-            const lowerSpec = modelSpec.toLowerCase();
-            const exact = scopedList.find(
-              (s) =>
-                `${s.model.provider}/${s.model.id}`.toLowerCase() ===
-                  lowerSpec || s.model.id.toLowerCase() === lowerSpec,
-            );
-            const matched =
-              exact ??
-              scopedList.find(
-                (s) =>
-                  s.model.id.toLowerCase().includes(lowerSpec) ||
-                  (s.model.name &&
-                    String(s.model.name).toLowerCase().includes(lowerSpec)) ||
-                  s.model.provider.toLowerCase().includes(lowerSpec),
-              );
-            if (matched) {
-              resolvedModel = matched.model;
-              resolvedThinking = thinking ?? matched.thinkingLevel;
-            } else {
-              const availableNames = scopedList
-                .map((s) => `${s.model.provider}/${s.model.id}`)
-                .join(", ");
-              throw new Error(
-                `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
-              );
-            }
-          } else {
-            const resolved = resolveCliModel({
-              cliModel: modelSpec,
-              cliThinking: thinking,
-              modelRuntime: runtime,
-            });
-            if (resolved.error) throw new Error(resolved.error);
-            if (resolved.warning) console.warn(resolved.warning);
-            resolvedModel = resolved.model;
-            resolvedThinking = thinking ?? resolved.thinkingLevel;
-          }
-        }
-
-        const parentTools = pi
-          .getActiveTools()
-          .filter((name) => name !== "bg" && name !== "subagent");
-        const requestedTools = tools
-          ?.split(",")
-          .map((tool) => tool.trim())
-          .filter(Boolean);
-        const unknownTools =
-          requestedTools?.filter((tool) => !parentTools.includes(tool)) ?? [];
-        if (unknownTools.length)
-          throw new Error(
-            `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
-          );
-        const childTools = requestedTools ?? parentTools;
-
-        mkdirSync(SUBAGENT_SESSION_DIR, { recursive: true, mode: 0o700 });
         const sessionManager = existing
           ? SessionManager.open(
               existing.sessionFile,
@@ -758,27 +720,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         if (!existing && context === "fork")
           for (const parentMessage of sanitizeForkMessages(ctx))
             sessionManager.appendMessage(parentMessage as any);
-        const requestedThinking = thinking ?? resolvedThinking;
-        const scopedEntry =
-          !resolvedModel && !existing
-            ? (scopedList?.find(
-                (s) =>
-                  s.model.id === ctx.model?.id &&
-                  s.model.provider === ctx.model?.provider,
-              ) ?? scopedList?.[0])
-            : undefined;
-        const selectedModel =
-          resolvedModel ??
-          (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
-        const effectiveThinking =
-          requestedThinking ??
-          (!existing
-            ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
-            : undefined);
-        checkSetup();
         const targetSessionId =
           existing?.sessionId ?? sessionManager.getSessionId();
-        let sessionLock: string;
         try {
           sessionLock = acquireSessionLock(targetSessionId);
         } catch (lockError) {
@@ -790,94 +733,36 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           }
           throw lockError;
         }
-        let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+        let prepared: Awaited<ReturnType<typeof setupChildSession>>;
         try {
-          created = await createAgentSession({
+          prepared = await setupChildSession({
             cwd: childCwd,
-            tools: childTools,
-            excludeTools: ["bg", "subagent"],
-            modelRuntime: runtime,
+            model,
+            thinking: thinking as ThinkingLevel | undefined,
+            tools,
             sessionManager,
-            ...(selectedModel ? { model: selectedModel } : {}),
-            ...(!existing
-              ? { thinkingLevel: effectiveThinking as ThinkingLevel }
-              : requestedThinking
-                ? { thinkingLevel: requestedThinking as ThinkingLevel }
-                : {}),
+            existing: Boolean(existing),
+            checkSetup,
           });
-          checkSetup();
         } catch (error) {
-          if (created) {
-            try {
-              await created.session.dispose();
-            } catch {}
-          }
+          // setupChildSession disposes anything it created; free the lock here
           try {
             rmSync(sessionLock, { recursive: true, force: true });
           } catch {}
           throw error;
         }
-        session = created.session;
-        modelFallbackMessage = created.modelFallbackMessage;
-        extensionsResult = created.extensionsResult;
-
-        controller = new AbortController();
-        let extensionsBound = false;
-        let disposed = false;
+        session = prepared.session;
+        modelFallbackMessage = prepared.modelFallbackMessage;
+        actualTools = prepared.actualTools;
         disposeChild = async () => {
-          if (disposed) return;
-          disposed = true;
-          try {
-            if (extensionsBound) {
-              try {
-                await session.extensionRunner.emit({
-                  type: "session_shutdown",
-                  reason: "quit",
-                });
-              } catch {}
-            }
-            await session.dispose();
-          } catch {}
+          await prepared.dispose();
           try {
             rmSync(sessionLock, { recursive: true, force: true });
           } catch {}
         };
-        try {
-          checkSetup();
-          extensionsBound = true;
-          await session.bindExtensions({
-            mode: "print",
-            abortHandler: () => void session.abort(),
-            shutdownHandler: () => controller.abort(),
-            onError: (error) =>
-              console.warn(`Subagent extension error: ${error.error}`),
-          });
-          checkSetup();
-          if (controller.signal.aborted)
-            throw new Error(
-              "Subagent extension requested shutdown during setup",
-            );
-          for (const error of extensionsResult.errors)
-            console.warn(
-              `Subagent extension failed to load ${error.path}: ${error.error}`,
-            );
-        } catch (error) {
-          await disposeChild();
-          throw error;
-        }
-
         if (!session.model) {
           await disposeChild();
           throw new Error("Subagent session did not initialize a model");
-        }
-        actualTools = session.getActiveToolNames();
-        const missingTools =
-          requestedTools?.filter((name) => !actualTools.includes(name)) ?? [];
-        if (missingTools.length) {
-          await disposeChild();
-          throw new Error(
-            `Requested tools were not available in the child: ${missingTools.join(", ")}`,
-          );
         }
         try {
           if (!existing) {
@@ -909,6 +794,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         throw setupError;
       }
 
+      controller = new AbortController();
       const pid = manager.nextVirtualPid++;
       let timedOut = false;
       let cancelled = false;
@@ -1149,13 +1035,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
     },
     renderCall(args, theme, _context) {
       const action = args.action ?? "spawn";
-      if (args.tasks?.length)
-        return new Text(
-          theme.fg("toolTitle", theme.bold(`Parallel: ${args.tasks.length} tasks`)) +
-            theme.fg("dim", args.concurrency ? ` (concurrency: ${args.concurrency})` : ""),
-          0,
-          0,
-        );
       if (args.chain?.length)
         return new Text(
           theme.fg("toolTitle", theme.bold(`Chain: ${args.chain.length} steps`)),
