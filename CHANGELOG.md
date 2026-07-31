@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.11
+
+- Security: fallback model selection is now reported in the child result when an explicit override is ignored because no active `scopedModels` exists.
+- Security: Git hooks are disabled for fallback worktree prune and branch cleanup commands.
+- Security: ambiguous scoped model matches are rejected instead of selecting the first candidate.
+
 ## 0.4.10
 
 - Security: disabled Git hooks (`core.hooksPath=/dev/null`) during `git worktree remove` calls for consistency with worktree creation.

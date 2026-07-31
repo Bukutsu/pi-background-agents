@@ -294,6 +294,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           }
         }
         const modelSpec = opts.model?.trim();
+        let modelRequestWarning: string | undefined;
         let resolvedModel: Model<any> | undefined;
         let resolvedThinking: ThinkingLevel | undefined;
         const scopedList = getScopedModels(ctx);
@@ -333,9 +334,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
               );
             }
           } else {
-            console.warn(
-              `Ignoring requested model '${modelSpec}': no active model scope; using the parent model`,
-            );
+            modelRequestWarning = `Requested model '${modelSpec}' was ignored because no active model scope exists; using the parent model`;
+            console.warn(modelRequestWarning);
           }
         }
         const parentTools = pi
@@ -493,9 +493,15 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             `Requested tools were not available in the child: ${missingTools.join(", ")}`,
           );
         }
+        const modelFallbackMessage = [
+          modelRequestWarning,
+          created.modelFallbackMessage,
+        ]
+          .filter((message): message is string => Boolean(message))
+          .join("\n");
         return {
           session,
-          modelFallbackMessage: created.modelFallbackMessage,
+          modelFallbackMessage: modelFallbackMessage || undefined,
           actualTools,
           dispose,
           forceDispose,

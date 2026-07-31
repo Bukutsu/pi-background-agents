@@ -76,12 +76,20 @@ export async function removeWorktree(
   // left "checked out"; delete the branch either way (best effort).
   if (!removed) {
     try {
-      await pi.exec("git", ["worktree", "prune"], { cwd: root });
+      await pi.exec(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "worktree", "prune"],
+        { cwd: root },
+      );
     } catch {}
   }
   if (branch) {
     try {
-      await pi.exec("git", ["branch", "-D", branch], { cwd: root });
+      await pi.exec(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "branch", "-D", branch],
+        { cwd: root },
+      );
     } catch {}
   }
 }
