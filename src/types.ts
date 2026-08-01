@@ -19,7 +19,7 @@ process.on("exit", () => {
   }
 });
 
-export const SUBAGENT_DIR = join(getAgentDir(), "pi-bg");
+export const SUBAGENT_DIR = join(getAgentDir(), "pi-background-agents");
 export const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 export const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 export const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");

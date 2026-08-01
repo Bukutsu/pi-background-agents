@@ -96,3 +96,78 @@ test("registers bg and subagent status tools", async () => {
   assert.equal(getSyncCalls(), 1);
   assert.equal(manager.killAllJobs instanceof Function, true);
 });
+
+test("validates bg and subagent tool parameters", async () => {
+  const { tools } = setup();
+  const bg = tools.find((t) => t.name === "bg");
+  const subagent = tools.find((t) => t.name === "subagent");
+  const ctx: any = {
+    cwd: process.cwd(),
+    hasUI: false,
+    isIdle: () => true,
+    sessionManager: {
+      getSessionId: () => "smoke-session",
+      getSessionFile: () => undefined,
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      bg.execute(
+        "id",
+        { action: "spawn", command: "" },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /command is required for spawn/,
+  );
+
+  await assert.rejects(
+    () =>
+      bg.execute(
+        "id",
+        { action: "stop", pid: 9999 },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /Shell job not found/,
+  );
+
+  await assert.rejects(
+    () =>
+      subagent.execute(
+        "id",
+        { action: "spawn", prompt: "" },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /prompt is required for spawn/,
+  );
+
+  await assert.rejects(
+    () =>
+      subagent.execute(
+        "id",
+        { action: "spawn", prompt: "test", cwd: "./src", worktree: true },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /cwd cannot be combined with worktree:true/,
+  );
+
+  await assert.rejects(
+    () =>
+      subagent.execute(
+        "id",
+        { action: "stop", sessionId: "missing" },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /Running subagent not found/,
+  );
+});

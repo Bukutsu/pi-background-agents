@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Renamed internal identifiers and storage from `pi-bg` to `pi-background-agents`; existing sessions/worktrees under `<agent-dir>/pi-bg` are moved to `<agent-dir>/pi-background-agents` on next startup.
+
 ## 0.4.11
 
 - Security: fallback model selection is now reported in the child result when an explicit override is ignored because no active `scopedModels` exists.

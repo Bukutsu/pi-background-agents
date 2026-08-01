@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-bg",
+      "name": "pi-background-agents",
       "devDependencies": {
         "@types/node": "^24.0.0",
         "prettier": "^3.5.0",

@@ -49,6 +49,7 @@ export async function removeWorktree(
   path: string,
   branch?: string,
 ): Promise<void> {
+  if (!path?.trim()) return;
   // Resolve the git repo root so we run git commands from the right place,
   // even if callers pass ctx.cwd instead of the repo root.
   let root = cwd;

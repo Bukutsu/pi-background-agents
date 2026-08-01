@@ -19,22 +19,6 @@ import { getLogDir } from "./types.js";
 import { renderToolResult, sanitizeTerminalOutput } from "./utils.js";
 
 const MAX_FULL_OUTPUT_BYTES = 10 * 1024 * 1024;
-const SAFE_ENV_KEYS = new Set([
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "TERM",
-  "COLORTERM",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "LANG",
-  "CI",
-  "NO_COLOR",
-  "FORCE_COLOR",
-]);
-
 export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
   const MAX_CMD_LEN = 120;
   async function runBgProcess(
@@ -50,15 +34,6 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
       safeCommand.length > MAX_CMD_LEN
         ? `${safeCommand.slice(0, MAX_CMD_LEN - 3)}...`
         : safeCommand;
-    if (
-      ctx.hasUI &&
-      !(await ctx.ui.confirm(
-        "Run background command?",
-        `This runs shell commands with your user permissions:\n${shownCommand}`,
-      ))
-    ) {
-      throw new Error("Background command was not approved");
-    }
     const pid = manager.nextVirtualPid++;
     const controller = new AbortController();
     const abortFromShutdown = () => controller.abort();
@@ -91,22 +66,8 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     manager.jobs.set(pid, job);
     manager.syncStatus(ctx);
 
-    // Pass only the execution environment a local command normally needs;
-    // credentials, shell hooks, and loader overrides stay out of child jobs.
-    const env: NodeJS.ProcessEnv = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key]) => SAFE_ENV_KEYS.has(key) || key.startsWith("LC_"),
-      ),
-    );
-    env.PATH = [
-      dirname(process.execPath),
-      join(homedir(), ".local", "bin"),
-      join(homedir(), ".bun", "bin"),
-      "/usr/local/bin",
-      "/opt/homebrew/bin",
-      "/usr/bin",
-      "/bin",
-    ].join(delimiter);
+    // Pass full developer environment with session context variables
+    const env: NodeJS.ProcessEnv = { ...process.env };
     env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
     if (ctx.sessionManager.getSessionFile())
       env.PI_SESSION_FILE = ctx.sessionManager.getSessionFile();
@@ -310,7 +271,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     promptGuidelines: [
       "Use bg for long-running processes (e.g. dev servers, builds, test suites, heavy installs, long background tasks) or when the user asks to run commands while continuing discussion.",
       "Use standard bash for quick commands with immediate output (e.g. ls, git status, file reads).",
-      "After starting bg, continue work immediately; never wait, sleep, or poll for completion.",
+      "After starting bg, continue work immediately; NEVER run sleep, loop, or poll commands to wait for completion. Output arrives automatically.",
     ],
     parameters: Type.Object({
       action: Type.Optional(

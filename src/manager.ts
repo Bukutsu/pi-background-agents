@@ -67,7 +67,7 @@ export class JobManager {
 
   private registerMessageRenderer() {
     this.pi.registerMessageRenderer(
-      "pi-bg-result",
+      "pi-background-agents-result",
       (message, options, theme) => {
         const text = sanitizeTerminalOutput(
           extractTextContent(message.content),
@@ -332,7 +332,7 @@ export class JobManager {
   ) {
     this.pi.sendMessage(
       {
-        customType: "pi-bg-result",
+        customType: "pi-background-agents-result",
         content: sanitizeTerminalOutput(message),
         display: true,
       },
@@ -392,6 +392,11 @@ export class JobManager {
       this.sendCompletionMessage(message, completion, active);
     } catch (error) {
       console.warn("Could not deliver bg result:", error);
+      this.pendingCompletions.push({
+        message,
+        completion,
+        expectedGeneration,
+      });
     }
   }
 

@@ -80,7 +80,7 @@ Set `worktree: true` when subagents edit code in parallel:
 }
 ```
 
-`pi-background-agents` creates a Git branch from `HEAD` and an isolated worktree in `<agent-dir>/pi-bg/worktrees`. It skips Git checkout hooks during creation, returns the branch and directory paths, and leaves them on disk for you to review, merge, or delete.
+`pi-background-agents` creates a Git branch from `HEAD` and an isolated worktree in `<agent-dir>/pi-background-agents/worktrees`. It skips Git checkout hooks during creation, returns the branch and directory paths, and leaves them on disk for you to review, merge, or delete.
 
 Do not combine `cwd` and `worktree: true` in the same call.
 
@@ -92,7 +92,7 @@ Setting `context: "fork"` copies the parent's current conversation into the chil
 
 ### Resume
 
-Subagent sessions are saved under `<agent-dir>/pi-bg` and persist across Pi restarts. Pass a session ID to resume:
+Subagent sessions are saved under `<agent-dir>/pi-background-agents` and persist across Pi restarts. Pass a session ID to resume:
 
 ```json
 {
@@ -159,11 +159,11 @@ Commands run through `bg` receive a reduced environment plus session identity va
 
 ## Storage
 
-| Data                               | Location                      |
-| ---------------------------------- | ----------------------------- |
-| Subagent session records and index | `<agent-dir>/pi-bg`           |
-| Worktrees                          | `<agent-dir>/pi-bg/worktrees` |
-| Temporary output logs              | Temp directory                |
+| Data                               | Location                                     |
+| ---------------------------------- | -------------------------------------------- |
+| Subagent session records and index | `<agent-dir>/pi-background-agents`           |
+| Worktrees                          | `<agent-dir>/pi-background-agents/worktrees` |
+| Temporary output logs              | Temp directory                               |
 
 Worktrees are not deleted or merged automatically. Temporary logs clean up according to OS policies. Child token usage appears in subagent status and completion reports, but does not alter the parent's already-finished tool call totals.
 

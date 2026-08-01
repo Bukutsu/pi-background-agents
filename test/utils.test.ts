@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { rmSync } from "node:fs";
 import {
+  acquireSessionLock,
   isSubagentRecord,
+  resolveSubagentCwd,
+  sanitizeForkMessages,
   sanitizeTerminalOutput,
   usageSince,
 } from "../src/utils.js";
@@ -54,4 +58,62 @@ test("handles absent usage fields and strips terminal control sequences", () => 
     },
   );
   assert.equal(sanitizeTerminalOutput("ok\x1b[31m unsafe\x1b[0m"), "ok unsafe");
+});
+
+test("resolveSubagentCwd resolves valid directories and rejects non-existent paths", () => {
+  const cwd = process.cwd();
+  assert.equal(resolveSubagentCwd(cwd, "."), cwd);
+  assert.equal(resolveSubagentCwd(cwd, "src"), `${cwd}/src`);
+  assert.throws(
+    () => resolveSubagentCwd(cwd, "non-existent-dir-12345"),
+    /cwd does not exist/,
+  );
+});
+
+test("acquireSessionLock acquires and cleans up locks", () => {
+  const sessionId = `test-lock-${Date.now()}`;
+  const lock = acquireSessionLock(sessionId);
+  assert.ok(lock.endsWith(sessionId));
+  assert.throws(
+    () => acquireSessionLock(sessionId),
+    /already running in process/,
+  );
+  rmSync(lock, { recursive: true, force: true });
+});
+
+test("sanitizeForkMessages strips bg/subagent calls and creates un-mutated message copies", () => {
+  const userMsg = { role: "user", content: "hello" };
+  const assistantMsg = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "ok" },
+      { type: "toolCall", id: "call-1", name: "read" },
+      { type: "toolCall", id: "call-2", name: "bg" },
+    ],
+  };
+  const toolResult = {
+    role: "toolResult",
+    toolCallId: "call-1",
+    content: "file content",
+  };
+
+  const mockCtx: any = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", id: "1", parentId: null, message: userMsg },
+        { type: "message", id: "2", parentId: "1", message: assistantMsg },
+        { type: "message", id: "3", parentId: "2", message: toolResult },
+      ],
+    },
+  };
+
+  const sanitized = sanitizeForkMessages(mockCtx);
+  assert.equal(sanitized.length, 3);
+  assert.notEqual(sanitized[0], userMsg); // Shallow copy check
+  assert.deepEqual(sanitized[0], userMsg);
+  const toolCalls = sanitized[1].content.filter(
+    (c: any) => c.type === "toolCall",
+  );
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, "read");
 });

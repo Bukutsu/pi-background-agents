@@ -121,7 +121,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       "For independent tasks that don't depend on each other, spawn multiple subagents in one turn; each runs in the background and its result arrives as it finishes.",
       "For sequential work that builds on prior results, spawn one subagent, then spawn the next with the previous result in its prompt.",
       "Use worktree:true for concurrent writing subagents; pi-background-agents creates but never merges or removes the branch/worktree.",
-      "After starting a subagent, continue work immediately; never wait, sleep, or poll action:status for completion. Results arrive automatically.",
+      "After starting a subagent, continue work immediately; NEVER execute sleep, loop, or poll commands to wait for completion. Return response to user or perform other tasks. Subagent results will arrive automatically when ready.",
     ],
     parameters: Type.Object({
       action: Type.Optional(
@@ -367,7 +367,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           throw new Error(
             `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
           );
-        const childTools = requestedTools ?? parentTools;
+        const childTools = requestedTools?.length
+          ? requestedTools
+          : parentTools;
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
@@ -668,22 +670,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
       };
       if (context === "fork") {
-        if (!ctx.hasUI) {
-          releaseTrackedSetup();
-          throw new Error("context:fork requires interactive approval");
-        }
-        try {
-          if (
-            !(await ctx.ui.confirm(
-              "Fork parent context?",
-              "This copies the parent conversation and tool output into a child session.",
-            ))
-          )
-            throw new Error("Forked context was not approved");
-        } catch (error) {
-          releaseTrackedSetup();
-          throw error;
-        }
+        checkSetup();
       }
       let finishSetup!: () => void;
       manager.track(
@@ -711,8 +698,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
         if (existing) {
           // Only resume from paths this extension controls: the session file
-          // must be a regular file inside the pi-bg session dir, and the cwd
-          // inside the parent project or a pi-bg worktree. A tampered index
+          // must be a regular file inside the pi-background-agents session
+          // dir, and the cwd inside the parent project or a
+          // pi-background-agents worktree. A tampered index
           // must not redirect the child elsewhere.
           let sessionFileReal = "";
           try {
@@ -820,6 +808,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       try {
         checkSetup();
         const removeLock = () => {
+          if (!sessionLock) return;
           try {
             rmSync(sessionLock, { recursive: true, force: true });
           } catch {}

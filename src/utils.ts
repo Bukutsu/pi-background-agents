@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
@@ -222,7 +222,10 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
   const callIds = new Set<string>();
   const sanitized: Array<Record<string, unknown>> = [];
   for (const message of messages) {
-    if (message.role === "custom" && message.customType === "pi-bg-result")
+    if (
+      message.role === "custom" &&
+      message.customType === "pi-background-agents-result"
+    )
       continue;
     if (
       message.role === "compactionSummary" ||
@@ -237,7 +240,7 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
     }
     if (message.role === "assistant") {
       if (typeof message.content === "string") {
-        sanitized.push(message as unknown as Record<string, unknown>);
+        sanitized.push({ ...message } as unknown as Record<string, unknown>);
         continue;
       }
       if (!Array.isArray(message.content)) continue;
@@ -261,7 +264,7 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
         sanitized.push({ ...message, usage: undefined });
       continue;
     }
-    sanitized.push(message as unknown as Record<string, unknown>);
+    sanitized.push({ ...message } as unknown as Record<string, unknown>);
   }
   return sanitized as any;
 }
@@ -340,36 +343,14 @@ export function getScopedModels(ctx: ExtensionContext) {
 }
 
 export function resolveSubagentCwd(parent: string, requested?: string) {
-  let root = parent;
+  const target = resolve(parent, requested?.trim() || ".");
+  let realTarget = target;
   try {
-    root = realpathSync(parent);
+    realTarget = realpathSync(target);
   } catch {}
-  const requestedPath = resolve(root, requested?.trim() || ".");
-  if (!existsSync(requestedPath))
-    throw new Error(`cwd does not exist: ${requestedPath}`);
-  let target = requestedPath;
-  try {
-    target = realpathSync(requestedPath);
-  } catch {}
-  const relRoot = relative(root, target);
-  const relParent = relative(parent, target);
-  // ponytail: test both realpath(root) and raw parent so a symlink inside the
-  // project doesn't falsely reject the target; AND rejects only when both paths
-  // agree the target escapes, preventing symlink-based traversal.
-  const isTraversal =
-    relRoot === ".." ||
-    relRoot.startsWith(".." + "/") ||
-    (process.platform === "win32" && relRoot.startsWith(".." + "\\"));
-  const isTraversalParent =
-    relParent === ".." ||
-    relParent.startsWith(".." + "/") ||
-    (process.platform === "win32" && relParent.startsWith(".." + "\\"));
-  if (isTraversal && isTraversalParent) {
-    throw new Error(
-      `cwd must be inside the parent project; use worktree:true for isolated external work: ${target}`,
-    );
-  }
-  if (!statSync(target).isDirectory())
-    throw new Error(`cwd is not a directory: ${target}`);
-  return target;
+  if (!existsSync(realTarget))
+    throw new Error(`cwd does not exist: ${realTarget}`);
+  if (!statSync(realTarget).isDirectory())
+    throw new Error(`cwd is not a directory: ${realTarget}`);
+  return realTarget;
 }
