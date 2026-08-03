@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix: subagent `cwd` accepts a leading `@` prefix in tool path arguments, matching built-in tool conventions.
+- Docs: `bg` and `subagent` tool descriptions now document result truncation limits (50KB / 2000 lines, full output saved to a private log).
+- Chore: devDependencies pin `@earendil-works` packages to the current pi release (0.83.0) so type-checking matches the runtime; `ctx.scopedModels` is now accessed through its typed API instead of a runtime workaround.
+
 - Renamed internal identifiers and storage from `pi-bg` to `pi-background-agents`; existing sessions/worktrees under `<agent-dir>/pi-bg` are moved to `<agent-dir>/pi-background-agents` on next startup.
 
 ## 0.4.11

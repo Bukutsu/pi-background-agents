@@ -265,7 +265,7 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
     name: "bg",
     label: "Background",
     description:
-      "Run, inspect, or stop long-running shell commands without blocking the agent session.",
+      "Run, inspect, or stop long-running shell commands without blocking the agent session. Displayed results are capped at 50KB or 2000 lines; truncated or failed jobs save full output to a private log (capped at 10MB).",
     promptSnippet:
       "Run, inspect, or stop long-running shell commands without blocking the agent session.",
     promptGuidelines: [

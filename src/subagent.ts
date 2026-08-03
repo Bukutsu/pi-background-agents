@@ -109,7 +109,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate exploration or research tasks to a background subagent.",
+      "Delegate exploration or research tasks to a background subagent. Results are capped at 50KB or 2000 lines; truncated output is saved to a private log and the durable child session remains resumable.",
     promptSnippet:
       "Delegate exploration or research tasks to a background subagent.",
     promptGuidelines: [
@@ -310,7 +310,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         let resolvedThinking: ThinkingLevel | undefined;
         const scopedList = getScopedModels(ctx);
         if (modelSpec) {
-          if (scopedList && scopedList.length > 0) {
+          if (scopedList.length > 0) {
             const lowerSpec = modelSpec.toLowerCase();
             const exactMatches = scopedList.filter(
               (s) =>
@@ -341,6 +341,8 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
             }
             if (matched) {
               resolvedModel = matched.model;
+              // ScopedModel.thinkingLevel is typed from pi-agent-core; the
+              // literal union is identical to pi-ai's ThinkingLevel.
               resolvedThinking = matched.thinkingLevel as
                 ThinkingLevel | undefined;
             } else {

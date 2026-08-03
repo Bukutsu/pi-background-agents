@@ -126,7 +126,7 @@ export class JobManager {
     this.pi.on("before_agent_start", (event, ctx) => {
       this.flushPendingCompletions(ctx);
       const scopedList = getScopedModels(ctx);
-      if (scopedList && scopedList.length > 0) {
+      if (scopedList.length > 0) {
         const modelsList = scopedList
           .map((s) => `\`${s.model.provider}/${s.model.id}\``)
           .join(", ");

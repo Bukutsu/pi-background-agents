@@ -64,6 +64,7 @@ test("resolveSubagentCwd resolves valid directories and rejects non-existent pat
   const cwd = process.cwd();
   assert.equal(resolveSubagentCwd(cwd, "."), cwd);
   assert.equal(resolveSubagentCwd(cwd, "src"), `${cwd}/src`);
+  assert.equal(resolveSubagentCwd(cwd, "@src"), `${cwd}/src`);
   assert.throws(
     () => resolveSubagentCwd(cwd, "non-existent-dir-12345"),
     /cwd does not exist/,

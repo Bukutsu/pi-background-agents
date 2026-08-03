@@ -19,7 +19,6 @@ import type {
   SessionStats,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import {
   SUBAGENT_INDEX,
@@ -330,20 +329,15 @@ export function acquireSessionLock(sessionId: string) {
 }
 
 export function getScopedModels(ctx: ExtensionContext) {
-  return "scopedModels" in ctx
-    ? (
-        ctx as {
-          scopedModels?: Array<{
-            model: Model<any>;
-            thinkingLevel?: string;
-          }>;
-        }
-      ).scopedModels
-    : undefined;
+  // ctx.scopedModels is typed on ExtensionContext; the fallback keeps the
+  // package usable against older pi runtimes that did not expose it.
+  return ctx.scopedModels ?? [];
 }
 
 export function resolveSubagentCwd(parent: string, requested?: string) {
-  const target = resolve(parent, requested?.trim() || ".");
+  // Models sometimes emit a leading @ in tool path arguments; strip it before
+  // resolving (built-in tools follow the same convention).
+  const target = resolve(parent, requested?.trim().replace(/^@/, "") || ".");
   let realTarget = target;
   try {
     realTarget = realpathSync(target);
