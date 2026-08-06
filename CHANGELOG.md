@@ -4,7 +4,8 @@
 
 - Fix: subagent `cwd` accepts a leading `@` prefix in tool path arguments, matching built-in tool conventions.
 - Docs: `bg` and `subagent` tool descriptions now document result truncation limits (50KB / 2000 lines, full output saved to a private log).
-- Chore: devDependencies pin `@earendil-works` packages to the current pi release (0.83.0) so type-checking matches the runtime; `ctx.scopedModels` is now accessed through its typed API instead of a runtime workaround.
+- Chore: devDependencies pin `@earendil-works` packages to the current pi release (0.84.0) so type-checking matches the runtime; `ctx.scopedModels` is now accessed through its typed API instead of a runtime workaround.
+- Compat: verified against pi 0.84.0 — type-check clean, all tests pass. The 0.84 `message_update` change (delta-only events) affects only the JSON/RPC bridge, not in-process extension events this package subscribes to; the `getApiKeyAndHeaders()` `null`-value change does not apply since the package never inspects provider headers.
 
 - Renamed internal identifiers and storage from `pi-bg` to `pi-background-agents`; existing sessions/worktrees under `<agent-dir>/pi-bg` are moved to `<agent-dir>/pi-background-agents` on next startup.
 
