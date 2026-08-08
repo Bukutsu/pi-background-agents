@@ -1,6 +1,7 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  isToolCallEventType,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   Box,
@@ -28,6 +29,47 @@ import {
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
+
+// A bash call is a wait when any statement of the command chain is a bare
+// sleep, a watch loop, or a loop body/loop construct that sleeps (statement
+// splitting on `;` turns `while true; do sleep 1; done` into `while true`,
+// `do sleep 1`, `done`, which the `do sleep` rule catches).
+// Statement-level matching keeps legitimate commands working (`rg sleep`,
+// `timeout 30 npm test`, `for f in *.js; do cat $f; done`) while catching
+// chains like `git pull && sleep 10` and `n=0; while [ $n -lt 5 ]; do sleep
+// 1; done`.
+const WAITING_STATEMENT_RE = [
+  /^sleep\s+\d+(?:\.\d+)?(?:s|m|h)?$/i,
+  /^watch\s+/i,
+  /^do\s+sleep\b/i,
+  /^(?:while|until)\b[\s\S]*\bsleep\b/i,
+  /^for\b[\s\S]*\bsleep\b/i,
+];
+
+/**
+ * Blocks bash sleep/polling loops at the tool boundary. `bg` and `subagent`
+ * are push-based: results are delivered automatically when ready, so waiting
+ * model calls waste turns. Prompt guidelines alone are not enough; some
+ * models ignore them and run `sleep 10 && subagent status` loops.
+ */
+export function registerWaitBlocker(pi: ExtensionAPI) {
+  pi.on("tool_call", (event) => {
+    if (!isToolCallEventType("bash", event)) return;
+    const command = event.input.command ?? "";
+    const statements = command.split(/(?:&&|\|\||;|\n|\||&)/);
+    for (const raw of statements) {
+      const statement = raw.trim();
+      if (!statement) continue;
+      if (WAITING_STATEMENT_RE.some((re) => re.test(statement))) {
+        return {
+          block: true,
+          reason:
+            "Do not use sleep or polling loops to wait for bg jobs or subagents; results arrive automatically when ready. Continue other work instead.",
+        };
+      }
+    }
+  });
+}
 
 export class JobManager {
   public jobs = new Map<number, BgJob>();
@@ -63,6 +105,7 @@ export class JobManager {
 
     this.registerMessageRenderer();
     this.registerLifecycleEvents();
+    registerWaitBlocker(this.pi);
   }
 
   private registerMessageRenderer() {

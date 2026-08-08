@@ -584,8 +584,11 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           statusDetails(record, active.get(record.sessionId)),
         );
         const text = formatSubagentStatusTable(sessions);
+        const nudge = active.size
+          ? "\n\nSubagent results are delivered automatically when ready; check status once for a single diagnostic, not in a polling loop."
+          : "";
         return {
-          content: [{ type: "text" as const, text }],
+          content: [{ type: "text" as const, text: text + nudge }],
           details: { sessions },
         };
       }

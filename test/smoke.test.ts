@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { registerWaitBlocker } from "../src/manager.js";
 import { registerBgModule } from "../src/bg.js";
 import { registerSubagentModule } from "../src/subagent.js";
 
@@ -45,6 +46,62 @@ function setup() {
     getSyncCalls: () => syncCalls,
   };
 }
+
+test("blocks sleep and polling loops in bash tool calls", async () => {
+  const handlers: Array<{ name: string; handler: (event: any) => any }> = [];
+  const pi: any = {
+    on(name: string, handler: (event: any) => any) {
+      handlers.push({ name, handler });
+    },
+  };
+  registerWaitBlocker(pi);
+  const toolCall = handlers.find((h) => h.name === "tool_call");
+  assert.ok(toolCall);
+  const run = (event: any) => toolCall.handler(event);
+
+  // Legitimate calls are not blocked.
+  assert.equal(
+    await run({ toolName: "bash", input: { command: "ls -la" } }),
+    undefined,
+  );
+  assert.equal(
+    await run({ toolName: "bash", input: { command: "rg -n sleep src" } }),
+    undefined,
+  );
+  assert.equal(
+    await run({ toolName: "bash", input: { command: "timeout 30 npm test" } }),
+    undefined,
+  );
+  assert.equal(
+    await run({
+      toolName: "bash",
+      input: {
+        command: "for f in src/*.ts; do wc -l $f; done",
+      },
+    }),
+    undefined,
+  );
+  assert.equal(
+    await run({ toolName: "read", input: { path: "src/manager.ts" } }),
+    undefined,
+  );
+
+  // Waiting calls are blocked, including chained and looped forms.
+  for (const command of [
+    "sleep 5",
+    "sleep 0.1 && subagent status",
+    "git pull && sleep 30",
+    "watch -n 2 ls",
+    "while true; do sleep 1; done",
+    "until curl -s localhost:8080; do sleep 5; done",
+    "for i in {1..10}; do sleep 1; done",
+    "n=0; while [ $n -lt 5 ]; do sleep 1; done",
+  ]) {
+    const result = await run({ toolName: "bash", input: { command } });
+    assert.equal(result?.block, true, `expected ${command} to be blocked`);
+    assert.match(result.reason, /results arrive automatically/);
+  }
+});
 
 test("registers bg and subagent status tools", async () => {
   const { tools, commands, manager, getKillAllCalls, getSyncCalls } = setup();
@@ -94,7 +151,6 @@ test("registers bg and subagent status tools", async () => {
   assert.equal(getKillAllCalls(), 1);
   assert.equal(notification, "Stopped 2 background jobs");
   assert.equal(getSyncCalls(), 1);
-  assert.equal(manager.killAllJobs instanceof Function, true);
 });
 
 test("validates bg and subagent tool parameters", async () => {

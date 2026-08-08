@@ -328,8 +328,10 @@ export function registerBgModule(pi: ExtensionAPI, manager: JobManager) {
           return `● [PID ${job.pid}] \`${job.command}\` (running, ${elapsed}s)`;
         });
         const text = items.join("\n");
+        const note =
+          "\n\nBackground results are delivered automatically when they finish; check status once for a single diagnostic, not in a polling loop.";
         return {
-          content: [{ type: "text" as const, text }],
+          content: [{ type: "text" as const, text: text + note }],
           details: {
             jobs: listed.map((j) => ({
               pid: j.pid,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix: restore the hard `tool_call` guard that blocks `bash` sleep/polling loops (a guard from the pre-0.4 rewrite that was dropped during refactoring). `bg` and `subagent` are push-based — results arrive automatically — and some models ignore prompt guidance and wait on `sleep 5`, `watch -n 2 …`, or `while true; do sleep 1; done` loops; these are now rejected at the tool boundary with an explanatory reason. Legitimate statements (`rg sleep`, `timeout 30 npm test`, `for f in *.js; do cat $f; done`) are unaffected.
+- Docs: `subagent status`/`bg status` responses now remind callers that results are delivered automatically and status is a single-shot diagnostic, not a polling loop, whenever jobs are active.
+- Tests: drop the tautological mock-self assertion in the smoke test and add direct unit coverage for the wait blocker (no LLM involvement).
+
 - Fix: subagent `cwd` accepts a leading `@` prefix in tool path arguments, matching built-in tool conventions.
 - Docs: `bg` and `subagent` tool descriptions now document result truncation limits (50KB / 2000 lines, full output saved to a private log).
 - Chore: devDependencies pin `@earendil-works` packages to the current pi release (0.84.0) so type-checking matches the runtime; `ctx.scopedModels` is now accessed through its typed API instead of a runtime workaround.
